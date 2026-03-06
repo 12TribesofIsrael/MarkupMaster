@@ -1,0 +1,49 @@
+> **You are building a local web application that replicates the BMB Ultimate Dispute Letter Generator pipeline. The app takes uploaded credit report images and produces a complete downloadable dispute package. Here is the full spec:**
+
+>
+> **PIPELINE (replicate exactly):**
+> 1. User uploads 1–10 credit report images (JPG/PNG/PDF) via a drag-and-drop UI
+> 2. Backend sends images to the Anthropic API (`claude-sonnet-4-6`) with the full BMB system prompt — all 15 project knowledge files concatenated as the system context, plus the uploaded images as user content
+> 3. Claude analyzes the report, runs the 33-point Metro 2 audit, identifies all violations by furnisher
+> 4. Backend uses the `docx` npm package to generate: one dispute letter per furnisher (addressed to the CRA, CC-ing the furnisher), a standalone File Disclosure letter, a Highlighting Guide, and Mailing Instructions — all as `.docx` files
+> 5. Backend generates an interactive HTML violation report
+> 6. All files are zipped together and served as one download
+>
+> **UI REQUIREMENTS:**
+> - Clean dark-themed dashboard (dark navy header, white cards)
+> - Step indicator: Upload → Analyzing → Generating → Download
+> - Progress bar during API call
+> - Violation summary cards (total, critical, high, medium) shown before download
+> - Download button for full ZIP + individual file links
+> - Error states with clear messages
+>
+> **FILE STRUCTURE TO CREATE:**
+> ```
+> bmb-webapp/
+>   server.js          ← Express server, API calls, docx generation, zip
+>   public/
+>     index.html       ← Single page app
+>     style.css
+>     app.js
+>   knowledge/         ← All 15 BMB project knowledge files go here
+>   uploads/           ← Temp storage for uploaded images
+>   outputs/           ← Generated files per session
+>   package.json
+> ```
+>
+> **KEY DEPENDENCIES to install:**
+> `express`, `multer` (file uploads), `docx` (Word doc generation), `archiver` (ZIP), `@anthropic-ai/sdk`, `dotenv`
+>
+> **ANTHROPIC API CALL PATTERN:**
+> - Model: `claude-sonnet-4-6`
+> - Load all files in the `knowledge/` folder as text and concatenate into the system prompt
+> - Send uploaded images as base64 in the user message
+> - Use the exact BMB Power Prompt from the Operating Protocol as the user message text
+> - Parse the response to extract violations by furnisher, then feed that structured data into the docx generators
+>
+> **ENV FILE needed:** Create `.env` with `ANTHROPIC_API_KEY=your_key_here`
+>
+> **The docx letter format must match exactly:** VIA CERTIFIED MAIL header block, CRA address, RE line, CC block with furnisher address and tracking number blank, consumer info block, numbered violations with statute citations, 8 statutory demands (A–H), compliance timeline, certification and signature block.
+>
+> Build the complete working application. Start with `server.js` and `package.json`, then the frontend, then test end-to-end with a sample run. Make sure `node server.js` starts the app on port 3000 with no errors.
+

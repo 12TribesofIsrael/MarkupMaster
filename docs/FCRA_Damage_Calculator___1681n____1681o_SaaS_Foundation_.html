@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FCRA Damage Calculator - §1681n & §1681o</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.2em;
+            margin-bottom: 8px;
+        }
+        .header p {
+            font-size: 0.95em;
+            opacity: 0.95;
+        }
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            padding: 40px;
+        }
+        @media (max-width: 1024px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+        }
+        .section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 25px;
+            border-left: 4px solid #2a5298;
+        }
+        .section h2 {
+            color: #1e3c72;
+            margin-bottom: 20px;
+            font-size: 1.4em;
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            color: #333;
+            font-weight: 500;
+            font-size: 0.95em;
+        }
+        input[type="number"],
+        input[type="text"],
+        select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.95em;
+            transition: border-color 0.3s;
+        }
+        input[type="number"]:focus,
+        input[type="text"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #2a5298;
+            background: #f0f7ff;
+        }
+        .radio-group {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }
+        .radio-group label {
+            display: flex;
+            align-items: center;
+            margin: 0;
+            cursor: pointer;
+            font-weight: normal;
+        }
+        input[type="radio"] {
+            margin-right: 8px;
+            cursor: pointer;
+        }
+        .checkbox-group {
+            display: grid;
+            gap: 10px;
+        }
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            margin: 0;
+            cursor: pointer;
+            font-weight: normal;
+        }
+        input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+        }
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #2a5298;
+            padding: 12px;
+            margin-bottom: 15px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #0c3a66;
+        }
+        button {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+            margin-top: 20px;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(42, 82, 152, 0.4);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        .results-section {
+            background: white;
+            border-radius: 8px;
+            padding: 0;
+            overflow: hidden;
+        }
+        .result-box {
+            background: #f8f9fa;
+            padding: 20px;
+            border-bottom: 2px solid #e0e0e0;
+            display: none;
+        }
+        .result-box.active {
+            display: block;
+        }
+        .result-box h3 {
+            color: #1e3c72;
+            margin-bottom: 12px;
+            font-size: 1.1em;
+        }
+        .result-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 0.95em;
+        }
+        .result-item:last-child {
+            border-bottom: none;
+        }
+        .result-label {
+            color: #555;
+            font-weight: 500;
+        }
+        .result-value {
+            color: #1e3c72;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+        .total-box {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            font-size: 1.3em;
+        }
+        .total-box .label {
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+        .total-box .amount {
+            font-size: 2.2em;
+            font-weight: bold;
+        }
+        .statute-ref {
+            background: #fff3cd;
+            border-left: 4px solid #ff9800;
+            padding: 12px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #856404;
+        }
+        .calculation-breakdown {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 0.9em;
+            line-height: 1.6;
+            color: #555;
+        }
+        .calculation-breakdown strong {
+            color: #1e3c72;
+        }
+        .footer {
+            background: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            font-size: 0.85em;
+            color: #666;
+            border-top: 1px solid #e0e0e0;
+        }
+        .export-btn {
+            background: #27ae60;
+            margin-top: 10px;
+        }
+        .export-btn:hover {
+            box-shadow: 0 8px 16px rgba(39, 174, 96, 0.4);
+        }
+        .warning {
+            background: #ffebee;
+            border-left: 4px solid #f44336;
+            padding: 12px;
+            margin: 15px 0;
+            border-radius: 4px;
+            color: #c62828;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>FCRA Damage Calculator</h1>
+            <p>Estimate statutory damages under 15 U.S.C. §1681n (Willful) & §1681o (Negligent)</p>
+        </div>
+
+        <div class="content">
+            <div class="section">
+                <h2>Case Information</h2>
+                <form id="damageForm">
+                    <div class="form-group">
+                        <label for="caseType">Violation Type:</label>
+                        <select id="caseType" required>
+                            <option value="">-- Select --</option>
+                            <option value="willful">Willful (§1681n) - Higher damages</option>
+                            <option value="negligent">Negligent (§1681o) - Lower damages</option>
+                        </select>
+                    </div>
+
+                    <div class="info-box">
+                        <strong>§1681n (Willful):</strong> CRA/Furnisher knowingly violated FCRA
+                        <br><strong>§1681o (Negligent):</strong> CRA/Furnisher failed to exercise reasonable care
+                    </div>
+
+                    <div class="form-group">
+                        <label>Number of Violations:</label>
+                        <input type="number" id="numViolations" min="1" max="100" value="1" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Violation Category:</label>
+                        <select id="violationCategory" required>
+                            <option value="">-- Select --</option>
+                            <option value="inaccurate">Inaccurate Information (§1681e(b))</option>
+                            <option value="furnisher">Furnisher Duty Failure (§1681s-2(b))</option>
+                            <option value="reinvestigation">Reinvestigation Failure (§1681i)</option>
+                            <option value="disclosure">Disclosure Failure (§1681g)</option>
+                            <option value="collection">FDCPA Violation with Credit Reporting</option>
+                            <option value="multiple">Multiple / Severe</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="creditScore">Current Credit Score (Optional):</label>
+                        <input type="number" id="creditScore" min="300" max="850" placeholder="e.g., 650">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="scoreDamage">Estimated Credit Score Damage (points):</label>
+                        <input type="number" id="scoreDamage" min="0" max="200" value="75" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Actual Damages (Quantifiable Harm):</label>
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" id="deniedCredit" value="5000"> Denied credit/loan (est. $5,000)</label>
+                            <label><input type="checkbox" id="higherRate" value="3000"> Higher interest rate (est. $3,000)</label>
+                            <label><input type="checkbox" id="employmentImpact" value="2000"> Employment impact (est. $2,000)</label>
+                            <label><input type="checkbox" id="emotionalDistress" value="1000"> Documented emotional distress (est. $1,000)</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="custodyData">Months Data Remained Inaccurate:</label>
+                        <input type="number" id="custodyData" min="1" max="60" value="6" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Prior Disputes/Complaints:</label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="priorDisputes" value="none" checked> No prior disputes</label>
+                            <label><input type="radio" name="priorDisputes" value="one"> 1 prior dispute</label>
+                            <label><input type="radio" name="priorDisputes" value="multiple"> 2+ prior disputes</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label><input type="checkbox" id="hasAttorney"> Represented by attorney (affects fee awards)</label>
+                    </div>
+
+                    <button type="button" onclick="calculateDamages()">Calculate Damages</button>
+                </form>
+            </div>
+
+            <div class="section results-section">
+                <div id="resultsContainer" style="display: none;">
+                    <div class="result-box active">
+                        <h3>Statutory Damages Calculation</h3>
+                        <div class="result-item">
+                            <span class="result-label">Violation Type</span>
+                            <span class="result-value" id="resViolationType">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Number of Violations</span>
+                            <span class="result-value" id="resNumViolations">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Per-Violation Range</span>
+                            <span class="result-value" id="resPerViolation">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Estimated Statutory Damages</span>
+                            <span class="result-value" id="resStatutory">--</span>
+                        </div>
+                        <div class="statute-ref" id="statuteRef"></div>
+                    </div>
+
+                    <div class="result-box active">
+                        <h3>Actual Damages</h3>
+                        <div class="result-item">
+                            <span class="result-label">Quantifiable Harm</span>
+                            <span class="result-value" id="resQuantifiable">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Credit Score Impact Factor</span>
+                            <span class="result-value" id="resCreditFactor">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Time in Custody Factor</span>
+                            <span class="result-value" id="resTimeFactor">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Total Actual Damages</span>
+                            <span class="result-value" id="resActualDamages">--</span>
+                        </div>
+                    </div>
+
+                    <div class="result-box active">
+                        <h3>Attorney's Fees & Costs</h3>
+                        <div class="result-item">
+                            <span class="result-label">Reasonable Attorney's Fees</span>
+                            <span class="result-value" id="resAttorneyFees">--</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Court Costs & Litigation</span>
+                            <span class="result-value" id="resCourtCosts">--</span>
+                        </div>
+                    </div>
+
+                    <div class="total-box">
+                        <div class="label">TOTAL ESTIMATED RECOVERY</div>
+                        <div class="amount" id="resTotal">$0</div>
+                    </div>
+
+                    <div class="calculation-breakdown" id="calcBreakdown"></div>
+
+                    <div class="warning" id="warningBox"></div>
+
+                    <button class="export-btn" onclick="exportResults()">📊 Export Results (PDF)</button>
+                </div>
+
+                <div id="noResults" style="padding: 30px; text-align: center; color: #999;">
+                    <p>Fill out the form and click "Calculate Damages" to see results</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p><strong>DISCLAIMER:</strong> This calculator provides estimates based on typical FCRA statutory damage frameworks. Actual damages vary by jurisdiction, court precedent, and case-specific facts. This is not legal advice. Consult an attorney for your specific case.</p>
+            <p style="margin-top: 10px;">Based on 15 U.S.C. §1681n (Willful) and §1681o (Negligent) Violations</p>
+        </div>
+    </div>
+
+    <script>
+        function calculateDamages() {
+            const caseType = document.getElementById('caseType').value;
+            const numViolations = parseInt(document.getElementById('numViolations').value) || 1;
+            const violationCategory = document.getElementById('violationCategory').value;
+            const creditScore = parseInt(document.getElementById('creditScore').value) || 650;
+            const scoreDamage = parseInt(document.getElementById('scoreDamage').value) || 75;
+            const custodyData = parseInt(document.getElementById('custodyData').value) || 6;
+            const priorDisputes = document.querySelector('input[name="priorDisputes"]:checked').value;
+            const hasAttorney = document.getElementById('hasAttorney').checked;
+
+            if (!caseType || !violationCategory) {
+                alert('Please select Violation Type and Category');
+                return;
+            }
+
+            // Calculate quantifiable harm
+            let quantifiable = 0;
+            document.querySelectorAll('.checkbox-group input[type="checkbox"]:checked').forEach(cb => {
+                quantifiable += parseInt(cb.value);
+            });
+
+            // Statutory Damages Range
+            let perViolationMin, perViolationMax, avgPerViolation;
+            if (caseType === 'willful') {
+                perViolationMin = 100;
+                perViolationMax = 1000;
+            } else {
+                perViolationMin = 25;
+                perViolationMax = 500;
+            }
+
+            avgPerViolation = (perViolationMin + perViolationMax) / 2;
+            const totalStatutory = avgPerViolation * numViolations;
+
+            // Multiplier based on violation category
+            let categoryMultiplier = 1;
+            if (violationCategory === 'multiple') categoryMultiplier = 1.5;
+            if (violationCategory === 'furnisher') categoryMultiplier = 1.3;
+
+            // Actual Damages Calculation
+            const creditFactorCalc = (scoreDamage / 100) * 500; // $500 per 100 points
+            const timeFactorCalc = (custodyData / 6) * 200; // Months in custody
+            const priorDisputeMultiplier = priorDisputes === 'multiple' ? 1.3 : (priorDisputes === 'one' ? 1.1 : 1);
+            
+            const actualDamages = (quantifiable + creditFactorCalc + timeFactorCalc) * priorDisputeMultiplier * categoryMultiplier;
+
+            // Attorney's Fees (if represented)
+            const attorneyFees = hasAttorney ? Math.max(5000, totalStatutory * 0.5) : 0;
+            const courtCosts = 500 + (numViolations * 50);
+
+            // Total Recovery
+            const totalRecovery = totalStatutory + actualDamages + attorneyFees + courtCosts;
+
+            // Display Results
+            document.getElementById('resultsContainer').style.display = 'block';
+            document.getElementById('noResults').style.display = 'none';
+
+            document.getElementById('resViolationType').textContent = caseType === 'willful' ? 'WILLFUL (§1681n)' : 'NEGLIGENT (§1681o)';
+            document.getElementById('resNumViolations').textContent = numViolations;
+            document.getElementById('resPerViolation').textContent = `$${perViolationMin.toLocaleString()}-$${perViolationMax.toLocaleString()} per violation`;
+            document.getElementById('resStatutory').textContent = `$${totalStatutory.toLocaleString()}`;
+
+            document.getElementById('resQuantifiable').textContent = `$${quantifiable.toLocaleString()}`;
+            document.getElementById('resCreditFactor').textContent = `$${Math.round(creditFactorCalc).toLocaleString()} (${scoreDamage} pt damage)`;
+            document.getElementById('resTimeFactor').textContent = `$${Math.round(timeFactorCalc).toLocaleString()} (${custodyData} months)`;
+            document.getElementById('resActualDamages').textContent = `$${Math.round(actualDamages).toLocaleString()}`;
+
+            document.getElementById('resAttorneyFees').textContent = hasAttorney ? `$${Math.round(attorneyFees).toLocaleString()}` : 'Not awarded (pro se)';
+            document.getElementById('resCourtCosts').textContent = `$${courtCosts.toLocaleString()}`;
+
+            document.getElementById('resTotal').textContent = `$${Math.round(totalRecovery).toLocaleString()}`;
+
+            // Statute Reference
+            const statuteText = caseType === 'willful' 
+                ? '15 U.S.C. §1681n: Willful noncompliance liability of $100-$1,000 per violation plus actual damages, attorney fees, and costs.'
+                : '15 U.S.C. §1681o: Negligent noncompliance liability of $25-$500 per violation plus actual damages, attorney fees, and costs.';
+            document.getElementById('statuteRef').innerHTML = statuteText;
+
+            // Calculation Breakdown
+            let breakdown = `<strong>Calculation Summary:</strong><br>`;
+            breakdown += `Statutory Damages: ${numViolations} violation(s) × $${Math.round(avgPerViolation).toLocaleString()} = $${Math.round(totalStatutory).toLocaleString()}<br>`;
+            breakdown += `Actual Damages: $${Math.round(actualDamages).toLocaleString()} (quantifiable + credit + custody factors)<br>`;
+            if (hasAttorney) breakdown += `Attorney's Fees: $${Math.round(attorneyFees).toLocaleString()}<br>`;
+            breakdown += `Court Costs: $${courtCosts.toLocaleString()}<br>`;
+            breakdown += `<strong>Total Estimated Recovery: $${Math.round(totalRecovery).toLocaleString()}</strong>`;
+            document.getElementById('calcBreakdown').innerHTML = breakdown;
+
+            // Warning
+            let warning = '⚠️ <strong>Important:</strong> This is an estimate. Actual recovery depends on jurisdiction, specific facts, judge/jury decision, and applicable case law. Courts may award higher or lower amounts.';
+            if (priorDisputes === 'multiple') warning += ' Multiple prior disputes strengthen your case.';
+            document.getElementById('warningBox').innerHTML = warning;
+        }
+
+        function exportResults() {
+            alert('📊 Export feature coming soon - Save this page as PDF using Ctrl+P (Windows) or Cmd+P (Mac)');
+        }
+    </script>
+</body>
+</html>

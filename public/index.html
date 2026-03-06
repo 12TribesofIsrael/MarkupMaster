@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BMB Dispute Letter Generator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">⚖</div>
+        <div>
+          <div class="logo-title">BMB Dispute Generator</div>
+          <div class="logo-sub">Automated FCRA Dispute Package Builder</div>
+        </div>
+      </div>
+      <div class="header-badge">Powered by Claude AI</div>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- Step Indicator -->
+    <div class="steps" id="stepIndicator">
+      <div class="step active" id="step1">
+        <div class="step-num">1</div>
+        <div class="step-label">Upload</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" id="step2">
+        <div class="step-num">2</div>
+        <div class="step-label">Analyzing</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" id="step3">
+        <div class="step-num">3</div>
+        <div class="step-label">Generating</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step" id="step4">
+        <div class="step-num">4</div>
+        <div class="step-label">Download</div>
+      </div>
+    </div>
+
+    <!-- Error Banner -->
+    <div class="error-banner" id="errorBanner" style="display:none">
+      <span class="error-icon">⚠</span>
+      <span id="errorText"></span>
+      <button class="error-close" onclick="clearError()">✕</button>
+    </div>
+
+    <!-- Upload Section -->
+    <div class="card" id="uploadSection">
+      <h2 class="card-title">Upload Credit Report</h2>
+      <p class="card-sub">Upload 1–10 images or PDF pages of your credit report. Claude will analyze all pages together.</p>
+
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf" multiple hidden>
+        <div class="dropzone-icon">📄</div>
+        <div class="dropzone-text">Drag & drop credit report files here</div>
+        <div class="dropzone-sub">JPG, PNG, or PDF &bull; Up to 10 files &bull; 20MB each</div>
+        <button class="btn btn-outline" onclick="document.getElementById('fileInput').click()">Browse Files</button>
+      </div>
+
+      <div class="file-list" id="fileList" style="display:none">
+        <div class="file-list-header">
+          <span id="fileCount">0 files selected</span>
+          <button class="btn-link" onclick="clearFiles()">Clear all</button>
+        </div>
+        <div id="fileItems"></div>
+      </div>
+
+      <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalysis()" disabled>
+        Analyze Credit Report →
+      </button>
+    </div>
+
+    <!-- Progress Section -->
+    <div class="card" id="progressSection" style="display:none">
+      <h2 class="card-title" id="progressTitle">Analyzing Credit Report...</h2>
+      <p class="card-sub" id="progressSub">Claude is running the 33-point Metro 2® audit and identifying FCRA violations. This typically takes 60–90 seconds.</p>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-steps" id="progressSteps">
+        <div class="progress-step active" id="ps1">🔍 Scanning accounts...</div>
+        <div class="progress-step" id="ps2">⚖ Identifying violations...</div>
+        <div class="progress-step" id="ps3">📝 Generating letters...</div>
+        <div class="progress-step" id="ps4">📦 Building package...</div>
+      </div>
+    </div>
+
+    <!-- Results Section -->
+    <div class="card" id="resultsSection" style="display:none">
+      <h2 class="card-title">Analysis Complete</h2>
+      <p class="card-sub" id="consumerName"></p>
+
+      <!-- Summary Cards -->
+      <div class="summary-grid" id="summaryGrid"></div>
+
+      <!-- Furnisher List -->
+      <div id="furnisherList" style="margin:24px 0"></div>
+
+      <!-- Download Area -->
+      <div class="download-area">
+        <a class="btn btn-primary btn-download" id="zipDownload" href="#" download>
+          ⬇ Download Full Dispute Package (.zip)
+        </a>
+        <div class="file-links" id="fileLinks"></div>
+      </div>
+
+      <button class="btn btn-outline" onclick="resetApp()" style="margin-top:16px;width:100%">
+        ← Start New Analysis
+      </button>
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    <p>BMB Ultimate Dispute Letter Generator &bull; All documents are for consumer self-help purposes &bull; Not legal advice</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
