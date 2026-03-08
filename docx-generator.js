@@ -126,10 +126,12 @@ function makeViolationBlock(v) {
     ],
   }));
 
-  // Sub-fields
+  // Sub-fields (BMB order: WHAT IS WRONG → REPORT SHOWS → SHOULD SHOW → IMPACT → PRECEDENT → DEMAND)
   const fields = [
     { label: 'WHAT IS WRONG:', value: v.description },
-    { label: 'IMPACT:', value: v.impact || 'This inaccuracy adversely affects the consumer\'s credit profile and ability to verify account accuracy.' },
+    ...(v.reportShows ? [{ label: 'REPORT SHOWS:', value: v.reportShows }] : []),
+    ...(v.shouldShow ? [{ label: 'SHOULD SHOW:', value: v.shouldShow }] : []),
+    { label: 'IMPACT:', value: v.impact || null },
     ...(v.precedent ? [{ label: 'PRECEDENT:', value: v.precedent }] : []),
     { label: 'DEMAND:', value: v.demand },
   ];
@@ -242,10 +244,11 @@ async function generateDisputeLetterDocx(letterData, consumer, outputPath) {
     }),
     blank(),
 
-    // CC block
+    // CC block (CRITICAL — never omit per BMB protocol)
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: `CC:  ${furnisherName.toUpperCase()}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     ...(furnisher.address ? [makeBody(furnisher.address)] : []),
     ...(furnisher.phone ? [makeBody(furnisher.phone)] : []),
+    makeBody('Certified Mail Tracking #: ________________________________'),
     blank(),
 
     // Consumer info
@@ -290,12 +293,38 @@ async function generateDisputeLetterDocx(letterData, consumer, outputPath) {
   // Output per-account
   for (const [acctName, acctViolations] of Object.entries(byAccount)) {
     const acct = accounts.find(a => a.accountName === acctName || a.accountNumber === acctName) || {};
-    children.push(makeSubHeading(`${acctName.toUpperCase()} — Account #${acct.accountNumber || '(see report)'}`));
-    if (acct.status || acct.balance) {
-      children.push(makeBody(`Status: ${acct.status || 'N/A'}   |   Balance: ${acct.balance || 'N/A'}   |   Date Opened: ${acct.dateOpened || 'N/A'}   |   DOFD: ${acct.dofd || 'N/A'}`));
+    children.push(makeSubHeading(`${acctName.toUpperCase()} — Account #${acct.accountNumber || 'NOT VISIBLE ON REPORT'}`));
+    // Build account detail lines from all available fields
+    const acctDetails = [];
+    if (acct.accountType) acctDetails.push(`Account Type: ${acct.accountType}`);
+    if (acct.status) acctDetails.push(`Status: ${acct.status}${acct.statusCode ? ` (Code ${acct.statusCode})` : ''}`);
+    if (acct.balance) acctDetails.push(`Balance: ${acct.balance}`);
+    if (acct.pastDue) acctDetails.push(`Past Due: ${acct.pastDue}`);
+    if (acct.creditLimit) acctDetails.push(`Credit Limit: ${acct.creditLimit}`);
+    if (acct.highCredit) acctDetails.push(`High Credit: ${acct.highCredit}`);
+    if (acct.originalChargeOffAmount) acctDetails.push(`Original Charge-Off Amount: ${acct.originalChargeOffAmount}`);
+    if (acct.dateOpened) acctDetails.push(`Date Opened: ${acct.dateOpened}`);
+    if (acct.dateClosed) acctDetails.push(`Date Closed: ${acct.dateClosed}`);
+    if (acct.dofd) acctDetails.push(`DOFD: ${acct.dofd}`);
+    if (acct.dateLastPayment) acctDetails.push(`Last Payment: ${acct.dateLastPayment}`);
+    if (acct.paymentHistory) acctDetails.push(`Payment History: ${acct.paymentHistory}`);
+    if (acct.ecoaCode) acctDetails.push(`ECOA: ${acct.ecoaCode}`);
+    if (acct.responsibilityType) acctDetails.push(`Responsibility: ${acct.responsibilityType}`);
+    if (acctDetails.length > 0) {
+      // Split into 2 lines for readability
+      const mid = Math.ceil(acctDetails.length / 2);
+      children.push(makeBody(acctDetails.slice(0, mid).join('   |   ')));
+      if (acctDetails.length > mid) {
+        children.push(makeBody(acctDetails.slice(mid).join('   |   ')));
+      }
     }
     for (const v of acctViolations) {
       children.push(...makeViolationBlock(v));
+    }
+    // Per-account summary line
+    if (acctViolations.length > 0) {
+      const critCount = acctViolations.filter(v => v.severity === 'CRITICAL').length;
+      children.push(makeBody(`This account contains ${acctViolations.length} distinct FCRA/Metro 2® violation(s)${critCount > 0 ? ` (${critCount} CRITICAL)` : ''}. DEMAND: Investigate, correct, or delete this tradeline in its entirety.`, { bold: true }));
     }
   }
 
@@ -306,8 +335,16 @@ async function generateDisputeLetterDocx(letterData, consumer, outputPath) {
     }
   }
 
-  // Section III: Statutory Demands
-  children.push(makeSectionHeading('III', 'STATUTORY DEMANDS'));
+  // Section III: Legal Precedent & Case Law
+  children.push(makeSectionHeading('III', 'LEGAL PRECEDENT & CASE LAW'));
+  children.push(makeBody('The following federal case law supports the violations and demands identified in this dispute:'));
+  children.push(makeBody(`• Gillespie v. Equifax Info. Servs. LLC — Truncated or masked account numbers violate §1681g(a)(1) because the consumer cannot independently verify the tradeline belongs to them.`, { indent: true }));
+  children.push(makeBody(`• Seamans v. Temple University — Payment history that jumps from current to severe delinquency without the required intermediate steps (30→60→90→120→150→180) constitutes inaccurate reporting under §1681e(b).`, { indent: true }));
+  children.push(makeBody(`• Cushman v. TransUnion Corp. — The CRA may not rely solely on the furnisher's e-OSCAR verification; it must conduct a reasonable, independent investigation per §1681i.`, { indent: true }));
+  children.push(makeBody(`• Bradshaw v. BAC Home Loans Servicing, LP — Boilerplate, automated e-OSCAR responses from furnishers do not constitute a "reasonable investigation" under §1681s-2(b).`, { indent: true }));
+
+  // Section IV: Statutory Demands
+  children.push(makeSectionHeading('IV', 'STATUTORY DEMANDS'));
   children.push(makeBody(`Pursuant to FCRA §1681i(a), I hereby formally demand that ${cra.name} perform the following within thirty (30) days of receipt of this letter:`));
 
   const demands = [
@@ -333,21 +370,27 @@ async function generateDisputeLetterDocx(letterData, consumer, outputPath) {
     }));
   });
 
-  // Section IV: Timeline & Consequences
-  children.push(makeSectionHeading('IV', 'COMPLIANCE TIMELINE & LEGAL CONSEQUENCES'));
+  // Section V: Timeline & Consequences
+  children.push(makeSectionHeading('V', 'COMPLIANCE TIMELINE & LEGAL CONSEQUENCES'));
   children.push(makeBody(`This dispute must be fully investigated and resolved within thirty (30) days of receipt, pursuant to FCRA §1681i(a)(1). The investigation period may be extended to forty-five (45) days only if the consumer submits additional relevant information during the investigation.`));
   children.push(makeBody('Failure to comply with these requirements may subject your organization to civil liability under:'));
   children.push(makeBody('• §1681n — Willful noncompliance: Statutory damages of $100–$1,000 per violation, plus punitive damages and attorney\'s fees.', { indent: true }));
   children.push(makeBody('• §1681o — Negligent noncompliance: Actual damages plus attorney\'s fees and court costs.', { indent: true }));
   children.push(makeBody('This letter may be submitted as evidence in any subsequent civil litigation.'));
 
-  // Section V: Enclosed Documentation
-  children.push(makeSectionHeading('V', 'ENCLOSED DOCUMENTATION'));
+  // Section VI: Enclosed Documentation
+  children.push(makeSectionHeading('VI', 'ENCLOSED DOCUMENTATION'));
   children.push(makeBody('The following documents are enclosed with this dispute letter:'));
   children.push(makeBody('☐  Government-issued photo identification (front and back)', { indent: true }));
   children.push(makeBody('☐  Proof of current address (utility bill, bank statement, or lease within 60 days)', { indent: true }));
   children.push(makeBody('☐  Highlighted copy of credit report with violations marked', { indent: true }));
   children.push(makeBody('☐  Copy of this dispute letter for your records', { indent: true }));
+
+  // Section VII: Certificate of Service
+  children.push(makeSectionHeading('VII', 'CERTIFICATE OF SERVICE'));
+  children.push(makeBody(`I hereby certify that on this date, a true and correct copy of this dispute letter, together with all enclosures, has been sent via United States Certified Mail, Return Receipt Requested, to:`));
+  children.push(makeBody(`1.  ${cra.name}, ${cra.dept}, ${cra.addr}, ${cra.city}`, { indent: true, bold: true }));
+  children.push(makeBody(`2.  ${furnisherName}${furnisher.address ? ', ' + furnisher.address : ''}`, { indent: true, bold: true }));
 
   // Signature block
   children.push(...makeSignatureBlock(consumer.name || '[Consumer Name]', consumer.address || '[Consumer Address]', today));

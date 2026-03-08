@@ -121,21 +121,138 @@ app.post('/analyze', (req, res, next) => {
     // BMB Power Prompt
     const powerPrompt = `ANALYZE THIS CREDIT REPORT AND GENERATE A COMPLETE BMB DISPUTE PACKAGE.
 
-Follow the MANDATORY VIOLATION ANALYSIS PROTOCOL exactly:
-1. Run the full 33-point Metro 2® charge-off audit on every account
-2. Apply the RED FLAG QUICK REFERENCE CHECKLIST (Sections A–L) to every account
-3. Identify ALL violations organized by furnisher (NOT by account)
-4. One dispute package per unique furnisher
+═══════════════════════════════════════════════════════════════
+ABSOLUTE GROUNDING RULES — VIOLATION OF THESE RULES IS FAILURE
+═══════════════════════════════════════════════════════════════
 
-CRITICAL: First output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIONS_JSON> tags using EXACTLY this schema:
+1. ONLY report data you can LITERALLY READ from the credit report images. Every value you output (account numbers, balances, dates, amounts, statuses) MUST be directly visible in the uploaded images.
+
+2. If a field is NOT VISIBLE or NOT PRESENT in the images, you MUST return null for that field. NEVER estimate, infer, calculate, or fabricate any value. A null is always better than a guess.
+
+3. When reporting a violation, you MUST quote the EXACT value as it appears on the report. Use the format: "Report shows: [exact value]" in your description. If the report shows nothing for that field, say "Report shows: [BLANK/NOT PRESENT]".
+
+4. NEVER invent dollar amounts, dates, account numbers, or credit limits. If you cannot read a number clearly from the image, use null and note "value not legible in image".
+
+5. Do NOT round, adjust, or "clean up" values. If the report shows "$2,391.47" report exactly "$2,391.47" — not "$2,392" or "$2,400".
+
+6. Account numbers: Report EXACTLY as shown, including any masking characters (X, *, etc.). If the report shows "6011XXXX2345" report exactly that. NEVER fill in masked digits.
+
+7. EVERY account MUST have an account number. Credit reports always display at least a partial/masked account number for each tradeline. Look carefully at the image — the number may be partially masked (e.g. "XXXXXXXXXXXX3651"), may appear in a different font, or may be in a column labeled "Account #", "Account Number", or "Acct". If you truly cannot find it after careful examination, use the format "NOT VISIBLE — [reason]" as the accountNumber value, never null.
+
+═══════════════════════════════════════════════════════════════
+33-POINT ANALYSIS PROTOCOL (Credit Manifesto + SOP)
+═══════════════════════════════════════════════════════════════
+
+For EACH account on the credit report, systematically check ALL 33 categories below.
+RULE: Every category that has a label on the report MUST have data — blank fields, dashes, or $0 where a real value should be = VIOLATION.
+RULE: If a category exists on the report but has no data, that is INCOMPLETE REPORTING (FCRA §1681e(b)).
+RULE: Experian and TransUnion are notorious for missing Date of First Delinquency — ALWAYS flag if missing.
+RULE: TransUnion commonly shows "$0" as last payment — flag this (how can last payment be $0?).
+RULE: Experian is notorious for having no data in payment history section — flag blank payment grids.
+
+1. ACCOUNT STATUS — Is it correct? (open/closed/charged-off/collection/paid). Does it match reality? Status not updated = violation. Status says "Charged Off" but was paid = violation. (FCRA §1681e(b))
+
+2. CHARGE-OFF AMOUNT — Is the amount written off present and accurate? Blank/missing = CRITICAL violation. Does it match balance at time of charge-off? Inflated or unexplained amount = violation. (Metro 2 Field 23)
+
+3. CHARGE-OFF DATE — Is the date present and accurate? Missing = violation. Does it align with payment history showing 6 months delinquency? Future date or impossible date = violation.
+
+4. ORIGINAL CREDITOR — Is the correct company listed? Wrong name, incomplete name, outdated name = violation. For collections: does it identify the original creditor? Missing original creditor on collection = violation. (FCRA §1681g(a)(2))
+
+5. ACCOUNT NUMBER — Is it present? Truncated with X's/asterisks preventing consumer verification = violation (Gillespie v. Equifax, FCRA §1681g(a)(1) — CRITICAL). Fewer digits than expected = violation. Wrong number = violation.
+
+6. ACCOUNT TYPE — Is the classification correct? (credit card, auto loan, mortgage, installment, revolving, collection). Wrong type affects credit scoring models. Mismatch = violation.
+
+7. PAYMENT HISTORY — Is the 24-month grid complete and accurate? Check for:
+   - Blank spaces in payment grid = NOT 100% maximum possible accuracy = VIOLATION (CRITICAL)
+   - "ND" (No Data) entries = VIOLATION
+   - Gaps or missing months = VIOLATION
+   - Fewer than 24 months shown = VIOLATION
+   - Delinquency progression must be logical: 30→60→90→120→150→180 days. Jumping from Current to 120+ without intermediate steps = VIOLATION (Seamans v. Temple University — CRITICAL)
+   - "C/O" or "C" appearing with no prior late history = VIOLATION
+   - Experian blank payment sections = flag as incomplete
+
+8. LAST PAYMENT DATE — Is it present and accurate? Does it match the payment history grid? If report says last payment January but January in the grid shows something different = VIOLATION. Blank for active account = violation. "$0" as last payment = inaccurate (TransUnion common issue).
+
+9. DATE OF FIRST DELINQUENCY (DOFD) — Is it present? MISSING DOFD = CRITICAL VIOLATION (consumer cannot determine 7-year removal date). Experian and TransUnion often omit this — ALWAYS CHECK. Does DOFD align with payment history? If DOFD says Feb 2018 but payment history shows a payment was made that month = contradiction = VIOLATION. (FCRA §1681c(a))
+
+10. COLLECTION INFORMATION — For collection accounts: is collection agency info accurate? Is original creditor identified? Same debt listed with multiple agencies = VIOLATION (duplicate tradeline). Outdated collection agency info = violation.
+
+11. BALANCE HISTORY — Does the balance history align with actual account activity? Incomplete history = violation. Balance jumps that don't make sense = violation. Balance shows amounts not matching credit limit or payments = violation.
+
+12. CREDIT LIMIT — Present for revolving accounts? Blank/missing/$0 for credit cards = VIOLATION (affects utilization ratio and credit scoring). Current balance > credit limit without explanation = violation. (Metro 2 Field 16)
+
+13. ACCOUNT OPENING DATE — Is the date present and accurate? Must be consistent across all three bureaus (if checking multiple). Blank or invalid date = violation. Does payment history start from this date? If opened 11/2015 but payment history shows 60 days late in December 2015 = impossible = VIOLATION.
+
+14. RESPONSIBILITY — Is it correctly marked? (Individual/Joint/Authorized User). Wrong designation = violation. ECOA code must match. Incorrect responsibility affects liability.
+
+15. DISPUTE HISTORY — Is there a record of previous disputes? "Disputed by consumer" comment but NO "In Dispute" flag = VIOLATION (FCRA §1681i(a)(5)(A)). Missing dispute history when previously disputed = violation.
+
+16. LATE PAYMENT DETAILS — Are the 30/60/90/120 day late indicators accurate? Late payments without documented verification method = violation (FCRA §1681i(c)). Arbitrary late markers with no explanation = violation.
+
+17. HIGH BALANCE / HIGHEST BALANCE — Is it present and accurate? Missing entirely = violation. Doesn't match actual account history = violation. High balance should match credit limit or highest actual balance.
+
+18. PAYMENT STATUS — Is it correct? (Paid as agreed, delinquent, default, charged off). Status conflicts with other fields = violation. Says "Current" but Past Due > $0 = violation. Says "Paid" but balance > $0 = violation.
+
+19. REMARKS OR COMMENTS — Are they accurate? Misleading remarks = violation. Comments that give incorrect impression of account = violation. "Settled for less" not noted when account was settled = violation.
+
+20. COMPLIANCE CONDITION CODES — Are special circumstance codes present when applicable? (natural disaster, active military duty). Missing when applicable = violation. Wrong code = violation.
+
+21. ORIGINAL LOAN AMOUNT — For installment loans: is it present and accurate? Missing = violation. Reported incorrectly = violation. Doesn't match loan documents = violation.
+
+22. CURRENT BALANCE — Is the amount currently owed accurate? Balance doesn't match reality = violation. Inflated balance = violation. Balance not updated after payment = violation. $0 balance with active charge-off status = conflicting data.
+
+23. SCHEDULED PAYMENT AMOUNT — Is the monthly payment correct per loan agreement? Wrong amount = violation. Scheduled payment > $0 for charged-off account (should be $0) = violation. Missing for active account = violation.
+
+24. PAST DUE AMOUNT — Is it accurate? Unexplained or suspicious past due = violation. Past Due > $0 but Status = Current = violation. Past Due = $0 but Status = Charge-off = suspicious.
+
+25. PAYMENT RATING / STATUS CODE — Is the status code correct? Status 97 for paid account = violation (should be 64). Status 05 but balance > $0 = violation. Conflicting codes = violation. Status not reflecting actual condition = violation.
+
+26. NARRATIVE CODES — Are standardized narrative codes accurate? Outdated codes = violation. Codes that misrepresent account status = violation.
+
+27. SPECIAL COMMENT CODES — Are they accurate and properly explained? Unexplained codes = violation. Conflicting special comments = violation.
+
+28. ESTIMATED REMOVAL DATE — Is the projected removal date calculated correctly? Should be 7 years from DOFD (10 years for bankruptcy). Missing = violation. Incorrectly calculated = violation. (FCRA §1681c(a))
+
+29. DATE REPORTED — Is it recent/current? Outdated date reported = violation. Inconsistent with other account info = violation. Stale reporting = violation.
+
+30. DATE UPDATED — When was info last updated? Outdated update date with current reporting = violation. Stale data being reported as current = violation.
+
+31. PURCHASED FROM / SOLD TO — For transferred accounts: is transfer info complete? Missing transfer chain = violation. Incomplete chain of custody = violation. Same debt appearing under both original and purchasing creditor = duplicate = violation.
+
+32. ORIGINAL CHARGE-OFF CREDITOR CLASSIFICATION — Is the creditor type correct? (bank, credit union, finance company). Wrong classification = violation.
+
+33. SECONDARY AGENCY INFORMATION — For accounts with multiple agencies: is it accurate? Outdated secondary agency = violation. Same debt listed multiple times with different agencies = VIOLATION.
+
+═══════════════════════════════════════════════════════════════
+SOP CROSS-CHECK (from BMB Standard Operating Procedure)
+═══════════════════════════════════════════════════════════════
+After checking all 33 categories, also perform these SOP-level cross-checks:
+
+A. COMPLETENESS SCAN: For every labeled category on the report that has NO DATA, a dash, or $0 where a real value belongs — flag as INCOMPLETE. Every category should have relevant information.
+
+B. DATE CONSISTENCY: Verify Date Opened is consistent (if visible across sections). Check if last payment date matches the payment history grid month.
+
+C. PAYMENT GRID INTEGRITY: Look at each year's payment history. Every box should have a status (OK/checkmark for on-time, or 30/60/90/120/150/180 for late). Blank boxes = NOT maximum possible accuracy.
+
+D. DELINQUENCY PROGRESSION: If an account went delinquent, verify 30→60→90→120→150→180 day progression. Charge-off typically after 6 months delinquency. Missing steps = violation.
+
+E. TERM PERIOD CHECK: For car loans, mortgages, installment loans — verify term period is listed and correct. Missing terms = violation.
+
+F. CROSS-FIELD CONTRADICTIONS: Draw logical lines between fields. If DOFD says Feb 2018 but payment history shows payment that month = contradiction. If status says "Closed" but Date Closed is blank = contradiction.
+
+═══════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════
+
+Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIONS_JSON> tags using EXACTLY this schema:
 
 <VIOLATIONS_JSON>
 {
   "consumer": {
-    "name": "Full Name",
-    "address": "Full Address",
-    "reportDate": "MM/DD/YYYY",
-    "bureau": "Experian|Equifax|TransUnion"
+    "name": "Full Name as shown on report",
+    "address": "Full Address as shown on report",
+    "reportDate": "MM/DD/YYYY as shown on report",
+    "bureau": "Experian|Equifax|TransUnion as shown on report"
   },
   "summary": {
     "total": 0,
@@ -145,31 +262,49 @@ CRITICAL: First output your findings as structured JSON between <VIOLATIONS_JSON
   },
   "furnishers": [
     {
-      "name": "Furnisher Name",
-      "address": "Furnisher Address (if available)",
-      "phone": "Phone (if available)",
+      "name": "Furnisher Name exactly as shown on report",
+      "address": "Furnisher Address if visible, or null",
+      "phone": "Phone if visible, or null",
       "accounts": [
         {
-          "accountName": "Name",
-          "accountNumber": "Number (as shown, may be truncated)",
-          "status": "Charge-off|Collection|Delinquent|Current|Closed",
-          "balance": "$0.00",
-          "pastDue": "$0.00",
-          "dateOpened": "MM/YYYY",
-          "dofd": "MM/YYYY or null"
+          "accountName": "Exactly as shown on report",
+          "accountNumber": "REQUIRED — exactly as shown including masking characters (e.g. 'XXXXXXXXXXXX3651'). If truly not findable after careful search, use 'NOT VISIBLE'",
+          "accountType": "Credit Card|Installment|Mortgage|Auto|Line of Credit|Collection — as shown, or null",
+          "status": "Exactly as shown on report (e.g. 'Charge-off', 'Collection', 'Paid')",
+          "statusCode": "Numeric status code if shown (e.g. 97, 64, 05), or null",
+          "balance": "Exact dollar amount as shown, or null if not visible",
+          "pastDue": "Exact dollar amount as shown, or null if not visible",
+          "creditLimit": "Exact amount as shown, or null if not visible",
+          "highCredit": "Exact amount as shown, or null if not visible",
+          "originalChargeOffAmount": "Exact amount as shown, or null if not visible",
+          "scheduledPayment": "Exact amount as shown, or null if not visible",
+          "dateOpened": "Exactly as shown on report, or null",
+          "dateClosed": "Exactly as shown on report, or null",
+          "dateLastActive": "Exactly as shown, or null",
+          "dateLastPayment": "Exactly as shown, or null",
+          "dateReported": "Exactly as shown, or null",
+          "dofd": "Exactly as shown, or null if not present",
+          "paymentHistory": "The 24-month payment string exactly as shown (e.g. 'CCCC1234567X'), or null",
+          "termsType": "Revolving|Installment — as shown, or null",
+          "ecoaCode": "ECOA code as shown, or null",
+          "specialComment": "Any special comment code/text as shown, or null",
+          "disputeFlag": "true if 'In Dispute' flag visible, false if not, null if unclear",
+          "responsibilityType": "Individual|Joint|Authorized User — as shown, or null"
         }
       ],
       "violations": [
         {
           "number": 1,
-          "accountName": "Account name this violation belongs to (must match an account in accounts[])",
-          "title": "Short violation title in ALL CAPS (e.g. CREDIT LIMIT MISSING)",
-          "severity": "CRITICAL",
-          "statute": "FCRA §1681g(a)(1) / Metro 2® Field 25 / etc.",
-          "description": "Detailed description of exactly what is wrong and what data is missing or inaccurate",
-          "impact": "How this specific violation harms the consumer or prevents accurate verification",
-          "precedent": "Relevant case law if applicable (e.g. Gillespie v. Equifax Info. Servs. LLC) or null",
-          "demand": "Specific remedy demanded — delete, correct, or provide documentation"
+          "accountName": "Must match an account in accounts[]",
+          "title": "Short violation title in ALL CAPS",
+          "severity": "CRITICAL|HIGH|MEDIUM",
+          "statute": "FCRA section / Metro 2 Field / case law",
+          "reportShows": "EXACT value from the credit report that proves this violation (quote verbatim), or 'FIELD NOT PRESENT' if the violation is a missing field",
+          "shouldShow": "What the correct/compliant value should be, or 'Must be present per [statute]'",
+          "description": "Detailed description referencing the exact data from the report",
+          "impact": "How this harms the consumer or prevents verification",
+          "precedent": "Case law citation or null",
+          "demand": "Specific remedy: delete, correct, provide documentation, or investigate"
         }
       ]
     }
@@ -177,7 +312,13 @@ CRITICAL: First output your findings as structured JSON between <VIOLATIONS_JSON
 }
 </VIOLATIONS_JSON>
 
-After the JSON block, provide any additional narrative analysis needed.`;
+IMPORTANT QUALITY RULES:
+- FURNISHERS ONLY: Only list actual data furnishers (creditors, lenders, collection agencies). Do NOT create a furnisher entry for the CRA itself (TransUnion, Experian, Equifax). CRA-level issues belong in the individual furnisher violations.
+- Every value in "accounts" must be EXACTLY as shown on the credit report images, or null. Do NOT fabricate any data.
+- Every violation "reportShows" field must quote the EXACT value from the report.
+- Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
+- Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
+- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.`;
 
     userContentBlocks.unshift({ type: 'text', text: powerPrompt });
 
@@ -185,7 +326,7 @@ After the JSON block, provide any additional narrative analysis needed.`;
     console.log(`[${sessionId}] Calling Claude API with ${req.files.length} file(s)...`);
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 16000,
+      max_tokens: 32000,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userContentBlocks }],
     });
@@ -205,6 +346,7 @@ After the JSON block, provide any additional narrative analysis needed.`;
     }
 
     if (!violationsData) {
+      console.error(`[${sessionId}] No VIOLATIONS_JSON found in response. First 500 chars:`, responseText.substring(0, 500));
       // Fallback structure
       violationsData = {
         consumer: { name: 'Unknown Consumer', address: '', reportDate: new Date().toLocaleDateString(), bureau: 'Experian' },
@@ -214,6 +356,29 @@ After the JSON block, provide any additional narrative analysis needed.`;
         mailingInstructions: responseText,
         highlightingGuide: '',
       };
+    }
+
+    // Filter out CRA-as-furnisher entries (TransUnion/Experian/Equifax are CRAs, not furnishers)
+    const craNames = ['transunion', 'experian', 'equifax'];
+    if (violationsData.furnishers) {
+      violationsData.furnishers = violationsData.furnishers.filter(f => {
+        const nameLower = (f.name || '').toLowerCase();
+        return !craNames.some(cra => nameLower.includes(cra));
+      });
+    }
+
+    // Recompute summary counts from actual violation severity badges (not Claude's summary)
+    if (violationsData.furnishers) {
+      let total = 0, critical = 0, high = 0, medium = 0;
+      for (const f of violationsData.furnishers) {
+        for (const v of (f.violations || [])) {
+          total++;
+          if (v.severity === 'CRITICAL') critical++;
+          else if (v.severity === 'HIGH') high++;
+          else if (v.severity === 'MEDIUM') medium++;
+        }
+      }
+      violationsData.summary = { total, critical, high, medium };
     }
 
     // Generate output files
@@ -396,6 +561,8 @@ function generateViolationReportHtml(data) {
           <span style="font-size:11px;font-weight:700;color:${severityColor[v.severity] || '#6b7280'};background:white;padding:2px 8px;border-radius:12px;border:1px solid ${severityColor[v.severity] || '#6b7280'}">${v.severity}</span>
         </div>
         <div style="font-size:12px;color:#6b7280;margin-bottom:6px;">${v.statute}</div>
+        ${v.reportShows ? `<div style="margin-bottom:4px;font-size:13px;"><strong style="color:#991b1b;">Report Shows:</strong> <code style="background:#fee2e2;padding:2px 6px;border-radius:3px">${v.reportShows}</code></div>` : ''}
+        ${v.shouldShow ? `<div style="margin-bottom:4px;font-size:13px;"><strong style="color:#166534;">Should Show:</strong> <code style="background:#dcfce7;padding:2px 6px;border-radius:3px">${v.shouldShow}</code></div>` : ''}
         <div style="margin-bottom:6px;">${v.description}</div>
         <div style="font-size:13px;color:#2563eb;"><strong>Demand:</strong> ${v.demand}</div>
       </div>`).join('');
@@ -403,10 +570,10 @@ function generateViolationReportHtml(data) {
     const accountsHtml = (f.accounts || []).map(a => `
       <tr>
         <td>${a.accountName}</td>
-        <td style="font-family:monospace">${a.accountNumber}</td>
+        <td style="font-family:monospace">${a.accountNumber && a.accountNumber !== 'null' ? a.accountNumber : '(not shown)'}</td>
         <td><span style="padding:2px 8px;border-radius:12px;font-size:12px;background:${a.status === 'Current' ? '#dcfce7' : '#fee2e2'};color:${a.status === 'Current' ? '#166534' : '#991b1b'}">${a.status}</span></td>
-        <td>${a.balance}</td>
-        <td>${a.pastDue}</td>
+        <td>${a.balance || '—'}</td>
+        <td>${a.creditLimit || '—'}</td>
         <td>${a.dofd || '—'}</td>
       </tr>`).join('');
 
@@ -419,7 +586,7 @@ function generateViolationReportHtml(data) {
         <thead><tr style="background:#f8fafc;text-align:left;">
           <th style="padding:8px 12px">Account</th><th style="padding:8px 12px">Number</th>
           <th style="padding:8px 12px">Status</th><th style="padding:8px 12px">Balance</th>
-          <th style="padding:8px 12px">Past Due</th><th style="padding:8px 12px">DOFD</th>
+          <th style="padding:8px 12px">Credit Limit</th><th style="padding:8px 12px">DOFD</th>
         </tr></thead>
         <tbody>${accountsHtml}</tbody>
       </table>` : ''}
@@ -442,7 +609,7 @@ function generateViolationReportHtml(data) {
 </head>
 <body>
 <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);color:white;padding:32px;text-align:center;" class="no-print">
-  <h1 style="font-size:24px;margin-bottom:4px;">BMB Credit Report Violation Analysis</h1>
+  <h1 style="font-size:24px;margin-bottom:4px;">BMB AI Automation — Markup Mastery Violation Analysis</h1>
   <p style="opacity:.7">${consumer.name} &bull; ${consumer.bureau || ''} Report &bull; ${consumer.reportDate || ''}</p>
 </div>
 
@@ -466,7 +633,7 @@ function generateViolationReportHtml(data) {
   ${furnisherHtml || '<div style="background:white;border-radius:12px;padding:32px;text-align:center;color:#6b7280">No furnishers identified in analysis.</div>'}
 
   <div style="text-align:center;color:#94a3b8;font-size:12px;padding:32px 0">
-    Generated by BMB Ultimate Dispute Letter Generator &bull; ${new Date().toLocaleDateString()}
+    Generated by BMB AI Automation — Markup Mastery Generator &bull; ${new Date().toLocaleDateString()}
   </div>
 </div>
 </body>
@@ -490,7 +657,7 @@ async function zipFiles(filePaths, zipPath, baseDir) {
 // ─── Start server ─────────────────────────────────────────────────────────────
 loadKnowledge().then(() => {
   app.listen(PORT, () => {
-    console.log(`\n✅ BMB Dispute Generator running at http://localhost:${PORT}\n`);
+    console.log(`\n✅ BMB AI Automation — Markup Mastery Generator running at http://localhost:${PORT}\n`);
   });
 }).catch(err => {
   console.error('Failed to load knowledge files:', err);
