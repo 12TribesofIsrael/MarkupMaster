@@ -244,6 +244,8 @@ F. CROSS-FIELD CONTRADICTIONS: Draw logical lines between fields. If DOFD says F
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════
 
+CRITICAL OUTPUT RULE: Your ENTIRE response must be ONLY the <VIOLATIONS_JSON>...</VIOLATIONS_JSON> block. Begin your response immediately with the opening <VIOLATIONS_JSON> tag. Do NOT write any analysis, narration, account listing, or preamble before it (no "I'll analyze...", no "ACCOUNTS IDENTIFIED:"). Do all reasoning silently and emit only the JSON. Any text outside the tags is a failure.
+
 Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIONS_JSON> tags using EXACTLY this schema:
 
 <VIOLATIONS_JSON>
@@ -324,15 +326,22 @@ IMPORTANT QUALITY RULES:
 
     // Call Claude
     console.log(`[${sessionId}] Calling Claude API with ${req.files.length} file(s)...`);
-    const response = await anthropic.messages.create({
+    // Stream the response — Sonnet 4.6 supports up to 64K output tokens, but the SDK
+    // requires streaming at that size to avoid HTTP timeouts on long generations.
+    const stream = anthropic.messages.stream({
       model: 'claude-sonnet-4-6',
-      max_tokens: 32000,
+      max_tokens: 64000,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userContentBlocks }],
     });
+    const response = await stream.finalMessage();
 
-    const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
-    console.log(`[${sessionId}] Claude response received (${Math.round(responseText.length / 1000)}k chars)`);
+    const textBlock = response.content.find((b) => b.type === 'text');
+    const responseText = textBlock ? textBlock.text : '';
+    console.log(`[${sessionId}] Claude response received (${Math.round(responseText.length / 1000)}k chars, stop_reason=${response.stop_reason})`);
+    if (response.stop_reason === 'max_tokens') {
+      console.warn(`[${sessionId}] WARNING: hit max_tokens cap — JSON may be truncated.`);
+    }
 
     // Parse JSON block
     let violationsData = null;
