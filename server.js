@@ -84,6 +84,43 @@ async function loadKnowledge() {
 // ─── Anthropic client ─────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Best-effort recovery of a truncated JSON string: cut to the last completed
+// value and append the closing braces/brackets for any structures left open.
+function salvageJson(s) {
+  let inStr = false, esc = false, lastSafe = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '}' || c === ']') lastSafe = i; // last completed value/structure
+  }
+  if (lastSafe === -1) return null;
+  let cut = s.slice(0, lastSafe + 1);
+  // Walk the cut string to find which structures are still open, then close them.
+  const stack = [];
+  inStr = false; esc = false;
+  for (let i = 0; i < cut.length; i++) {
+    const c = cut[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') stack.push('}');
+    else if (c === '[') stack.push(']');
+    else if (c === '}' || c === ']') stack.pop();
+  }
+  while (stack.length) cut += stack.pop();
+  return cut;
+}
+
 // ─── POST /analyze ────────────────────────────────────────────────────────────
 app.post('/analyze', (req, res, next) => {
   req.sessionId = uuidv4();
@@ -244,6 +281,14 @@ F. CROSS-FIELD CONTRADICTIONS: Draw logical lines between fields. If DOFD says F
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════
 
+⚠️ CRITICAL OUTPUT RULE — VIOLATION OF THIS RULE CAUSES TOTAL FAILURE:
+Your ENTIRE response must be ONLY the <VIOLATIONS_JSON>...</VIOLATIONS_JSON> block and NOTHING else.
+- Do NOT write ANY preamble, narration, commentary, or explanation before or after the JSON.
+- Do NOT write a "PRE-ANALYSIS ACCOUNT INVENTORY" or describe your process out loud.
+- Do NOT restate these instructions or announce what you are about to do.
+- Perform the entire 33-point analysis SILENTLY, then output ONLY the resulting JSON.
+- Your very first characters must be the opening <VIOLATIONS_JSON> tag. Your very last characters must be the closing </VIOLATIONS_JSON> tag.
+
 Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIONS_JSON> tags using EXACTLY this schema:
 
 <VIOLATIONS_JSON>
@@ -318,7 +363,12 @@ IMPORTANT QUALITY RULES:
 - Every violation "reportShows" field must quote the EXACT value from the report.
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
-- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.`;
+- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.
+
+═══════════════════════════════════════════════════════════════
+FINAL REMINDER — OUTPUT ONLY JSON
+═══════════════════════════════════════════════════════════════
+Respond with ONLY the <VIOLATIONS_JSON>...</VIOLATIONS_JSON> block. The very first character of your response must be "<" (the opening tag). Do NOT write "I'll now perform...", do NOT write a PRE-ANALYSIS ACCOUNT INVENTORY, do NOT narrate or explain anything. Do the analysis silently and output only the JSON.`;
 
     userContentBlocks.unshift({ type: 'text', text: powerPrompt });
 
@@ -326,22 +376,41 @@ IMPORTANT QUALITY RULES:
     console.log(`[${sessionId}] Calling Claude API with ${req.files.length} file(s)...`);
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 32000,
+      max_tokens: 64000,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userContentBlocks }],
     });
 
-    const responseText = response.content[0].type === 'text' ? response.content[0].text : '';
-    console.log(`[${sessionId}] Claude response received (${Math.round(responseText.length / 1000)}k chars)`);
+    const responseText = response.content[0] && response.content[0].type === 'text' ? response.content[0].text : '';
+    console.log(`[${sessionId}] Claude response received (${Math.round(responseText.length / 1000)}k chars, stop_reason=${response.stop_reason})`);
 
     // Parse JSON block
     let violationsData = null;
+    let jsonStr = null;
     const jsonMatch = responseText.match(/<VIOLATIONS_JSON>([\s\S]*?)<\/VIOLATIONS_JSON>/);
     if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    } else {
+      // No closing tag — response was likely truncated or the tag was omitted.
+      // Salvage the JSON object starting at the first "{".
+      const open = responseText.indexOf('{');
+      if (open !== -1) jsonStr = responseText.slice(open).trim();
+    }
+    if (jsonStr) {
       try {
-        violationsData = JSON.parse(jsonMatch[1].trim());
+        violationsData = JSON.parse(jsonStr);
       } catch (e) {
         console.warn(`[${sessionId}] JSON parse failed:`, e.message);
+        // Best-effort recovery for a truncated object: close open braces/brackets.
+        const salvaged = salvageJson(jsonStr);
+        if (salvaged) {
+          try {
+            violationsData = JSON.parse(salvaged);
+            console.warn(`[${sessionId}] Recovered truncated JSON via salvage.`);
+          } catch (e2) {
+            console.warn(`[${sessionId}] Salvage failed:`, e2.message);
+          }
+        }
       }
     }
 
