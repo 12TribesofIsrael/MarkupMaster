@@ -9,6 +9,7 @@ const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const { generateDisputeLetterDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateHighlightingGuideDocx, generateFactualDisputeLetterDocx, generateMarkupMapDocx } = require('./docx-generator');
+const { annotateCreditReportPdf } = require('./pdf-annotator');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -504,6 +505,31 @@ IMPORTANT QUALITY RULES:
     const htmlPath = path.join(outputDir, 'Violation_Report.html');
     fs.writeFileSync(htmlPath, htmlReport, 'utf8');
     generatedFiles.push({ name: 'Violation_Report.html', path: htmlPath, label: 'Interactive Violation Report' });
+
+    // Persist parsed violations JSON (debugging + re-annotation without re-analyzing)
+    fs.writeFileSync(path.join(outputDir, 'violations_data.json'), JSON.stringify(violationsData, null, 2), 'utf8');
+
+    // Original + annotated credit report copies (PDF uploads only).
+    // The original is kept untouched; the annotated copy gets red boxes and
+    // numbered callouts matching the Factual Dispute Letter / Markup Map.
+    for (const file of req.files) {
+      if (path.extname(file.originalname).toLowerCase() !== '.pdf') continue;
+      const base = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9_-]/g, '_');
+      try {
+        const originalName = `Original_Credit_Report_${base}.pdf`;
+        const originalCopy = path.join(outputDir, originalName);
+        fs.copyFileSync(file.path, originalCopy);
+        generatedFiles.push({ name: originalName, path: originalCopy, label: `Original Credit Report — ${file.originalname}` });
+
+        const annotatedName = `Annotated_Credit_Report_${base}.pdf`;
+        const annotatedPath = path.join(outputDir, annotatedName);
+        const stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath);
+        console.log(`[${sessionId}] Annotated ${file.originalname}: ${stats.located}/${stats.totalItems} items boxed${stats.missed.length ? ` (not located: ${stats.missed.map(m => m.item).join(', ')})` : ''}`);
+        generatedFiles.push({ name: annotatedName, path: annotatedPath, label: `Annotated Credit Report (red boxes) — ${file.originalname}` });
+      } catch (e) {
+        console.warn(`[${sessionId}] PDF annotation failed for ${file.originalname}:`, e.message);
+      }
+    }
 
     // ZIP everything
     const zipPath = path.join(outputDir, 'BMB_Dispute_Package.zip');
