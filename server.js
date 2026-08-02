@@ -8,7 +8,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
-const { generateDisputeLetterDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateHighlightingGuideDocx } = require('./docx-generator');
+const { generateDisputeLetterDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateHighlightingGuideDocx, generateFactualDisputeLetterDocx, generateMarkupMapDocx } = require('./docx-generator');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -241,6 +241,59 @@ E. TERM PERIOD CHECK: For car loans, mortgages, installment loans — verify ter
 F. CROSS-FIELD CONTRADICTIONS: Draw logical lines between fields. If DOFD says Feb 2018 but payment history shows payment that month = contradiction. If status says "Closed" but Date Closed is blank = contradiction.
 
 ═══════════════════════════════════════════════════════════════
+CLOSED-UNIVERSE FORENSIC AUDIT (report-against-itself method)
+═══════════════════════════════════════════════════════════════
+In addition to the 33-point protocol, you are acting as a forensic factual credit report auditor.
+Treat the credit report as a SELF-CONTAINED document. You are NOT trying to guess the "true" answer —
+you are testing whether the bureau's OWN reporting is missing, blank, incomplete, inaccurate,
+contradictory, internally inconsistent, confusing, or unsupported by its own report presentation.
+Use ONLY what appears on the report itself: the Account Information section, the Payment History grid,
+the Remarks/Comments/Status/Removal date/Date updated fields, and (if multiple bureau reports are
+provided) the same account across bureaus. Never rely on outside documents or assumptions.
+
+G. PAYMENT HISTORY GRID vs ACCOUNT INFORMATION — for each account, explicitly compare:
+   - last payment date vs what the payment history grid shows for that month
+   - last payment amount vs payment history
+   - account status vs grid progression
+   - charge-off status vs remarks
+   - balance vs past due
+   - closed status / date closed vs continued monthly updates after closure
+   - DOFD vs the visible delinquency sequence in the grid
+   - estimated removal date vs visible delinquency timing
+   - "paid in full" remarks vs charge-off / past due / delinquent reporting
+   - high balance / credit limit / monthly payment / terms vs the rest of the account
+   Repeated charge-off reporting month after month, unexplained resets, and updates after closure
+   are each independent findings.
+
+H. CROSS-BUREAU COMPARISON — if more than one bureau's report is provided for the same account,
+   compare balances, dates, statuses, payment histories, remarks, credit limits, high balances,
+   past due amounts, DOFD timing, closure dates, removal dates, and data present on one report
+   but missing on another. Each material inconsistency is a separate finding.
+
+I. ISSUE CLASSIFICATION — classify every violation with exactly one issueType:
+   "Missing field" | "Blank field" | "Incomplete field" | "Internal inconsistency" |
+   "Contradiction between account info and payment history" | "Contradiction within payment history" |
+   "Cross-bureau inconsistency" | "Potential reporting issue requiring clarification"
+   Do NOT automatically say every blank field is illegal or false — state precisely WHY the field is
+   challenged: it is missing, it conflicts with another part of the same report, it makes the reporting
+   incomplete or contradictory, or the tradeline cannot be understood or verified from the face of the report.
+
+J. PLAIN-LANGUAGE DISPUTE WORDING — for every violation, also write a "disputeWording": one or two
+   short, factual, plain-English consumer sentences suitable for a one-round dispute letter.
+   No legal essay, no threats, no overexplaining. Each ends with "Please fix or delete this entire account."
+   Examples of the required style:
+   - "What was the date of first delinquency? Please fix or delete this entire account."
+   - "The Last Payment Date is listed as Aug 14, 2023, but the payment history grid shows no payment
+     that month. How can both be true? Please fix or delete this entire account."
+   - "The account is listed in charge-off status, but the remarks say 'paid in full.' This is
+     contradictory. Please fix or delete this entire account."
+
+K. MARKUP LOCATIONS — for every violation, record where on the report it is visible so it can be
+   boxed in red with a numbered callout. Use the PDF page number the field appears on. If a
+   contradiction involves two locations (e.g. a field in Account Information AND a month cell in the
+   Payment History grid), list BOTH locations — both get the same callout number.
+
+═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════
 
@@ -301,12 +354,21 @@ Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIO
           "title": "Short violation title in ALL CAPS",
           "severity": "CRITICAL|HIGH|MEDIUM",
           "statute": "FCRA section / Metro 2 Field / case law",
+          "issueType": "Missing field|Blank field|Incomplete field|Internal inconsistency|Contradiction between account info and payment history|Contradiction within payment history|Cross-bureau inconsistency|Potential reporting issue requiring clarification",
           "reportShows": "EXACT value from the credit report that proves this violation (quote verbatim), or 'FIELD NOT PRESENT' if the violation is a missing field",
           "shouldShow": "What the correct/compliant value should be, or 'Must be present per [statute]'",
           "description": "Detailed description referencing the exact data from the report",
           "impact": "How this harms the consumer or prevents verification",
           "precedent": "Case law citation or null",
-          "demand": "Specific remedy: delete, correct, provide documentation, or investigate"
+          "demand": "Specific remedy: delete, correct, provide documentation, or investigate",
+          "disputeWording": "One or two short factual plain-English sentences for the one-round letter, ending with 'Please fix or delete this entire account.'",
+          "markup": [
+            {
+              "page": 3,
+              "section": "Account Information|Payment History|Remarks|Personal Information|Summary",
+              "markText": "The exact text/field/month cell to draw a red box around, quoted as it appears (e.g. 'Last Payment Date: Aug 14, 2023' or 'September 2023 payment history cell')"
+            }
+          ]
         }
       ]
     }
@@ -320,7 +382,10 @@ IMPORTANT QUALITY RULES:
 - Every violation "reportShows" field must quote the EXACT value from the report.
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
-- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.`;
+- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.
+- EVERY violation MUST include issueType, disputeWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (same callout number).
+- Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
+- Never claim fraud or identity theft unless the report itself supports it.`;
 
     userContentBlocks.unshift({ type: 'text', text: powerPrompt });
 
@@ -408,6 +473,16 @@ IMPORTANT QUALITY RULES:
       );
       generatedFiles.push({ name: filename, path: filepath, label: `Dispute Letter — ${furnisher.name}` });
     }
+
+    // Factual one-round dispute letter (closed-universe audit style)
+    const factualPath = path.join(outputDir, 'Factual_Dispute_Letter.docx');
+    await generateFactualDisputeLetterDocx(violationsData, factualPath);
+    generatedFiles.push({ name: 'Factual_Dispute_Letter.docx', path: factualPath, label: 'Factual One-Round Dispute Letter' });
+
+    // Markup Map (red boxes + numbered callouts, matches factual letter numbering)
+    const markupPath = path.join(outputDir, 'Markup_Map.docx');
+    await generateMarkupMapDocx(violationsData, markupPath);
+    generatedFiles.push({ name: 'Markup_Map.docx', path: markupPath, label: 'Markup Map (Red Box Guide)' });
 
     // File Disclosure Demand letter
     const disclosurePath = path.join(outputDir, 'File_Disclosure_Demand.docx');

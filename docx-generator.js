@@ -693,6 +693,139 @@ async function generateHighlightingGuideDocx(violationsData, outputPath) {
   fs.writeFileSync(outputPath, buffer);
 }
 
+// ─── FACTUAL ONE-ROUND DISPUTE LETTER (closed-universe audit style) ───────────
+
+function factualWording(v) {
+  if (v.disputeWording) return v.disputeWording;
+  // Fallback: build a short factual line from the structured fields
+  const base = v.reportShows && v.reportShows !== 'FIELD NOT PRESENT'
+    ? `The report shows "${v.reportShows}" for ${v.title ? v.title.toLowerCase() : 'this field'}, which is inaccurate or inconsistent.`
+    : `${v.title ? v.title.charAt(0) + v.title.slice(1).toLowerCase() : 'A required field'} is missing or blank on this account.`;
+  return `${base} Please fix or delete this entire account.`;
+}
+
+async function generateFactualDisputeLetterDocx(violationsData, outputPath) {
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const consumer = (violationsData && violationsData.consumer) || {};
+  const furnishers = (violationsData && violationsData.furnishers) || [];
+  const cra = getCRA(consumer.bureau);
+
+  const children = [
+    makeBody(today, { bold: true }),
+    blank(),
+    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    makeBody(cra.dept),
+    makeBody(cra.addr),
+    makeBody(cra.city),
+    blank(),
+    makeBody(`From: ${consumer.name || '[Consumer Name]'}`),
+    makeBody(consumer.address || '[Consumer Address]'),
+    blank(),
+    makeBody('RE: Dispute of inaccurate, incomplete, and contradictory information on my credit report', { bold: true }),
+    makeBody(`Report date: ${consumer.reportDate || today}`),
+    makeHRule(),
+    makeBody('To whom it may concern:'),
+    makeBody('I am writing to dispute several inaccuracies in my credit report regarding the accounts listed below. I have reviewed my credit report and found multiple errors — information that is missing, incomplete, or contradicts other information on the same report — that require correction.'),
+    makeBody('Per my rights under the FCRA, I request that you investigate the following inaccuracies:'),
+    blank(80),
+  ];
+
+  let itemNo = 0;
+  for (const f of furnishers) {
+    const violations = f.violations || [];
+    if (violations.length === 0) continue;
+    const acctNums = (f.accounts || []).map(a => a.accountNumber).filter(Boolean).join(', ');
+    children.push(makeSubHeading(`${f.name.toUpperCase()}${acctNums ? ` — Account ${acctNums}` : ''}`));
+    for (const v of violations) {
+      itemNo++;
+      children.push(new Paragraph({
+        spacing: { before: 60, after: 60 },
+        indent: { left: 360 },
+        children: [
+          new TextRun({ text: `${itemNo}.  `, bold: true, size: sz(FONT_BODY), font: FONT }),
+          new TextRun({ text: factualWording(v), size: sz(FONT_BODY), font: FONT }),
+        ],
+      }));
+    }
+  }
+
+  children.push(blank(80));
+  children.push(makeBody('Please investigate each numbered item above. If any item cannot be verified as complete and accurate, delete the account from my credit file. Please correct or delete these items, send me an updated copy of my credit report showing the results of your investigation, and notify anyone who received my report in the past six months of the corrections, as applicable.'));
+  children.push(makeBody('Thank you for your prompt attention to this matter.'));
+  children.push(blank(160));
+  children.push(makeBody('Sincerely,'));
+  children.push(blank(200));
+  children.push(makeBody('_________________________________'));
+  children.push(makeBody(consumer.name || '[Consumer Name]', { bold: true }));
+  children.push(makeBody(consumer.address || '[Consumer Address]'));
+
+  const doc = makeDoc(children);
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+}
+
+// ─── MARKUP MAP ───────────────────────────────────────────────────────────────
+
+async function generateMarkupMapDocx(violationsData, outputPath) {
+  const consumer = (violationsData && violationsData.consumer) || {};
+  const furnishers = (violationsData && violationsData.furnishers) || [];
+
+  const children = [
+    makeBanner('MARKUP MAP — RED BOX & CALLOUT GUIDE'),
+    blank(),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Bureau: ${consumer.bureau || ''}   |   Report Date: ${consumer.reportDate || ''}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    makeHRule(),
+    makeBody('Every numbered item below matches the same item number in the Factual Dispute Letter. On your copy of the credit report: draw a RED BOX around each field or payment-history cell listed, and write the RED CALLOUT NUMBER next to it. When one item lists two locations, mark BOTH locations with the same number.'),
+    blank(80),
+  ];
+
+  let itemNo = 0;
+  for (const f of furnishers) {
+    const violations = f.violations || [];
+    if (violations.length === 0) continue;
+    children.push(makeSubHeading(`FURNISHER: ${f.name.toUpperCase()}`));
+
+    for (const v of violations) {
+      itemNo++;
+      const marks = (v.markup && v.markup.length > 0) ? v.markup : [{
+        page: null,
+        section: 'Account Information',
+        markText: v.reportShows && v.reportShows !== 'FIELD NOT PRESENT'
+          ? v.reportShows
+          : `${v.title || 'disputed'} field (blank/missing)`,
+      }];
+
+      children.push(new Paragraph({
+        spacing: { before: 140, after: 40 },
+        children: [
+          new TextRun({ text: `Item ${itemNo}`, bold: true, size: sz(FONT_BODY), font: FONT }),
+          new TextRun({ text: `   [${v.issueType || v.severity || ''}]`, italics: true, size: sz(10), font: FONT }),
+        ],
+      }));
+      children.push(makeBody(`Account: ${v.accountName || f.name}`, { indent: true }));
+      children.push(makeBody(`Page: ${marks.map(m => m.page != null ? m.page : 'locate on report').join(' + ')}`, { indent: true }));
+      children.push(makeBody(`Section: ${marks.map(m => m.section || 'Account Information').join(' + ')}`, { indent: true }));
+      marks.forEach((m, i) => {
+        children.push(makeBody(`${i === 0 ? 'Mark this:' : 'Also mark this:'} "${m.markText}"${m.page != null ? ` (page ${m.page})` : ''}`, { indent: true, bold: true }));
+      });
+      children.push(makeBody(`Annotation: Red box around ${marks.length > 1 ? 'both locations' : 'this location'}`, { indent: true }));
+      children.push(makeBody(`Label: Red callout number ${itemNo}`, { indent: true }));
+      children.push(makeBody(`Why: ${v.description || v.title || ''}`, { indent: true }));
+    }
+  }
+
+  if (itemNo === 0) {
+    children.push(makeBody('No dispute items were identified — nothing to mark.'));
+  }
+
+  children.push(blank(120));
+  children.push(makeBody('Note: This generator cannot directly edit the PDF/image, but this markup map is complete enough for manual or software-based annotation of the report copy that goes in each mailing package.', { italic: true }));
+
+  const doc = makeDoc(children);
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function numberWord(n) {
@@ -719,4 +852,6 @@ module.exports = {
   generateFileDisclosureDocx,
   generateMailingInstructionsDocx,
   generateHighlightingGuideDocx,
+  generateFactualDisputeLetterDocx,
+  generateMarkupMapDocx,
 };
