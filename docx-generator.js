@@ -771,11 +771,11 @@ async function generateMarkupMapDocx(violationsData, outputPath) {
   const furnishers = (violationsData && violationsData.furnishers) || [];
 
   const children = [
-    makeBanner('MARKUP MAP — RED BOX & CALLOUT GUIDE'),
+    makeBanner('MARKUP MAP — RED BOX GUIDE'),
     blank(),
     new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Bureau: ${consumer.bureau || ''}   |   Report Date: ${consumer.reportDate || ''}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     makeHRule(),
-    makeBody('Every numbered item below matches the same item number in the Factual Dispute Letter. On your copy of the credit report: draw a RED BOX around each field or payment-history cell listed, and write the RED CALLOUT NUMBER next to it. When one item lists two locations, mark BOTH locations with the same number.'),
+    makeBody('Every numbered item below matches the same item number in the Factual Dispute Letter. On your copy of the credit report: draw a RED BOX around each field or payment-history cell listed. Boxes only — do NOT write numbers on the report. When one item lists two locations, box BOTH locations.'),
     blank(80),
   ];
 
@@ -808,8 +808,7 @@ async function generateMarkupMapDocx(violationsData, outputPath) {
       marks.forEach((m, i) => {
         children.push(makeBody(`${i === 0 ? 'Mark this:' : 'Also mark this:'} "${m.markText}"${m.page != null ? ` (page ${m.page})` : ''}`, { indent: true, bold: true }));
       });
-      children.push(makeBody(`Annotation: Red box around ${marks.length > 1 ? 'both locations' : 'this location'}`, { indent: true }));
-      children.push(makeBody(`Label: Red callout number ${itemNo}`, { indent: true }));
+      children.push(makeBody(`Annotation: Red box around ${marks.length > 1 ? 'both locations' : 'this location'} — box only, no number written on the report`, { indent: true }));
       children.push(makeBody(`Why: ${v.description || v.title || ''}`, { indent: true }));
     }
   }

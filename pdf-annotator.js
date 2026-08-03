@@ -1,9 +1,9 @@
-// PDF annotator — draws red boxes + numbered callouts on a COPY of the uploaded
+// PDF annotator — draws red boxes (no numbering) on a COPY of the uploaded
 // credit report. The original file is never modified. Locations come from each
 // violation's markup[] entries (page + markText); text positions are found by
 // searching the PDF's own text layer, so boxes land on the real field text.
 const fs = require('fs');
-const { PDFDocument, rgb, StandardFonts, degrees } = require('pdf-lib');
+const { PDFDocument, rgb } = require('pdf-lib');
 
 let pdfjsLib = null;
 function getPdfjs() {
@@ -70,6 +70,17 @@ async function extractPageLines(pdfBuffer) {
   return pages;
 }
 
+// markText sometimes arrives as a description rather than a quote — with "..."
+// ellipses, "■" placeholder squares, or bracketed notes like "[blank cell]"
+// that never appear in the page text. Strip those before searching.
+function sanitizeMarkText(markText) {
+  return String(markText || '')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/…|\.{2,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Build normalized search candidates from a markup entry's markText,
 // strongest (most specific) first.
 function candidatesFor(markText) {
@@ -129,6 +140,41 @@ function findYearRow(pages, pageHint, year) {
   return null;
 }
 
+// 24-month-history rows ("06/25 ■ ... 022") are findable by their leading
+// MM/YY date even when the rest of the markText never matches the page text.
+function findRowByLeadingToken(pages, pageHint, token) {
+  const tok = normalize(token);
+  if (!tok) return null;
+  const hi = (pageHint || 0) - 1;
+  const order = [hi, hi + 1, hi - 1].filter(pi => pi >= 0 && pi < pages.length);
+  for (const pi of order) {
+    for (const L of pages[pi].lines) {
+      if (L.text === tok || L.text.startsWith(tok + ' ')) {
+        return { pageIndex: pi, line: L, items: L.items };
+      }
+    }
+  }
+  return null;
+}
+
+// Search a SINGLE page for a text match (used by last-resort fallbacks, where
+// searching the whole document would land on the wrong account's section).
+function findOnPage(pages, pageIndex, text) {
+  if (pageIndex < 0 || pageIndex >= pages.length) return null;
+  const cand = normalize(text);
+  if (!cand || cand.length < 3) return null;
+  for (const line of pages[pageIndex].lines) {
+    const idx = line.text.indexOf(cand);
+    if (idx < 0) continue;
+    const matchEnd = idx + cand.length;
+    const matched = line.ranges
+      .filter(r => r.end > idx && r.start < matchEnd)
+      .map(r => r.item);
+    return { pageIndex, line, items: matched.length ? matched : line.items };
+  }
+  return null;
+}
+
 // Find the best line for a markup entry. The stated page is tried first,
 // then its neighbors, then the whole document.
 function findLine(pages, pageHint, cands) {
@@ -159,22 +205,22 @@ function findLine(pages, pageHint, cands) {
 }
 
 /**
- * Annotate a copy of the credit report PDF with red boxes + numbered callouts.
- * Item numbering matches the Factual Dispute Letter / Markup Map (sequential
- * across all furnishers' violations). Returns { totalItems, located, missed }.
+ * Annotate a copy of the credit report PDF with red boxes only — no numbering.
+ * (Numbered callouts were removed on purpose: they drifted out of sync with the
+ * Factual Dispute Letter's item numbers. The box location itself identifies the
+ * disputed field.) Returns { totalItems, located, missed }.
  */
 async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath) {
   const buffer = fs.readFileSync(inputPdfPath);
   const pages = await extractPageLines(buffer);
 
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
-  const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const pdfPages = pdfDoc.getPages();
 
   let itemNo = 0;
   let located = 0;
   const missed = [];
-  const callouts = []; // placed callout positions, to nudge collisions apart
+  const drawnBoxes = []; // {p, x, y, width, height} — to nest coinciding boxes
 
   for (const f of (violationsData.furnishers || [])) {
     for (const v of (f.violations || [])) {
@@ -187,13 +233,22 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath)
 
       let anyHit = false;
       for (const m of marks) {
+        const clean = sanitizeMarkText(m.markText);
         let hit = null;
-        const yearRow = String(m.markText || '').match(/^\s*((?:19|20)\d{2})\s*(?:row)?\s*(?:[—–-]|$)/);
+        const yearRow = clean.match(/^((?:19|20)\d{2})\b/);
         if (yearRow) hit = findYearRow(pages, m.page, yearRow[1]);
         if (!hit) {
-          const cands = candidatesFor(m.markText);
+          const cands = candidatesFor(clean);
           hit = cands.length ? findLine(pages, m.page, cands) : null;
         }
+        if (!hit) {
+          const lead = clean.match(/^(\d{2}\/\d{2})\b/);
+          if (lead) hit = findRowByLeadingToken(pages, m.page, lead[1]);
+        }
+        // Guaranteed fallbacks: every dispute item must show at least one box.
+        // Box the section heading, else the furnisher heading, on the stated page.
+        if (!hit) hit = findOnPage(pages, (m.page || 0) - 1, m.section);
+        if (!hit) hit = findOnPage(pages, (m.page || 0) - 1, f.name);
         if (!hit) continue;
         anyHit = true;
 
@@ -203,31 +258,24 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath)
         const minX = Math.min(...boxItems.map(i => i.x));
         const maxX = Math.max(hit.extendToX || 0, ...boxItems.map(i => i.x + i.w));
         const maxH = Math.max(...boxItems.map(i => i.h));
-        const pad = 2.5;
-        const box = {
-          x: minX - pad,
-          y: L.y - pad,
-          width: (maxX - minX) + pad * 2,
-          height: maxH + pad * 2,
-        };
+        // If this box lands where one was already drawn (two items sharing a
+        // field, or fallbacks sharing a heading), grow the padding so the boxes
+        // nest visibly instead of overprinting as one.
+        let pad = 2.5;
+        let box;
+        do {
+          box = {
+            x: minX - pad,
+            y: L.y - pad,
+            width: (maxX - minX) + pad * 2,
+            height: maxH + pad * 2,
+          };
+          pad += 3;
+        } while (drawnBoxes.some(b => b.p === hit.pageIndex &&
+          Math.abs(b.x - box.x) < 2 && Math.abs(b.y - box.y) < 2 &&
+          Math.abs(b.width - box.width) < 4 && Math.abs(b.height - box.height) < 4));
+        drawnBoxes.push({ p: hit.pageIndex, ...box });
         pg.drawRectangle({ ...box, borderColor: RED, borderWidth: 1.4 });
-
-        // Numbered callout: red disc with white number, left of the box
-        // (falls back to the right edge if there is no left margin room)
-        const r = 7.5;
-        let cx = box.x - r - 5;
-        if (cx - r < 3) cx = box.x + box.width + r + 5;
-        let cy = box.y + box.height / 2;
-        while (callouts.some(c => c.p === hit.pageIndex && Math.abs(c.cx - cx) < r * 2 && Math.abs(c.cy - cy) < r * 2)) {
-          cy -= r * 2 + 3;
-        }
-        callouts.push({ p: hit.pageIndex, cx, cy });
-
-        pg.drawEllipse({ x: cx, y: cy, xScale: r, yScale: r, color: RED });
-        const label = String(itemNo);
-        const size = label.length > 2 ? 6.5 : 8;
-        const tw = font.widthOfTextAtSize(label, size);
-        pg.drawText(label, { x: cx - tw / 2, y: cy - size / 2.6, size, font, color: rgb(1, 1, 1) });
       }
 
       if (anyHit) located++;

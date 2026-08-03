@@ -141,10 +141,24 @@ ABSOLUTE GROUNDING RULES — VIOLATION OF THESE RULES IS FAILURE
 7. EVERY account MUST have an account number. Credit reports always display at least a partial/masked account number for each tradeline. Look carefully at the image — the number may be partially masked (e.g. "XXXXXXXXXXXX3651"), may appear in a different font, or may be in a column labeled "Account #", "Account Number", or "Acct". If you truly cannot find it after careful examination, use the format "NOT VISIBLE — [reason]" as the accountNumber value, never null.
 
 ═══════════════════════════════════════════════════════════════
+ACCOUNT SCOPE — DEROGATORY / NEGATIVE ACCOUNTS ONLY
+═══════════════════════════════════════════════════════════════
+
+Before any analysis, classify every account on the report. ONLY analyze and report violations for DEROGATORY accounts — accounts showing ANY of: charge-off, collection, repossession, foreclosure, settled / settled for less than full balance, past due balance > $0, delinquent or default status, or any late payment marker (30/60/90/120/150/180) anywhere in the payment history grid.
+
+SKIP ENTIRELY — zero violations, no accounts[] entry, no letters — any account in good standing: "Pays As Agreed", "Paid As Agreed", "Current", "Paid", "Paid and Closed", "Never Late", "Exceptional Payment History", or any account with a clean payment history and no derogatory indicator anywhere on its tradeline. We only dispute negative items; positive accounts must not be touched.
+
+If a furnisher has ONLY positive accounts, do NOT create a furnisher entry for it at all. If a furnisher has both, include only its derogatory accounts.
+
+PRECEDENCE: the derogatory indicators ALWAYS override the status label. If the payment-history grid shows ANY late marker (30/60/90/120/150/180) or other derogatory indicator, the account IS derogatory and MUST be included — even when its status line says "Pays As Agreed" or "Current". A clean status label on top of a late-marked grid is itself a reporting contradiction worth disputing. The status label alone can only EXCLUDE an account when the grid and every other field are also clean.
+
+CRITICAL — THIS SCOPE RULE FILTERS ACCOUNTS ONLY. It must NEVER remove, weaken, or skip any violation CATEGORY. For every DEROGATORY account, ALL 33 categories below still apply in FULL FORCE — explicitly including category 5 (ACCOUNT NUMBER): an account number masked or truncated with * or X characters (e.g. "*3312") prevents consumer verification and IS a violation (Gillespie v. Equifax, FCRA §1681g(a)(1) — CRITICAL). Every derogatory account whose displayed account number contains masking characters MUST receive this violation.
+
+═══════════════════════════════════════════════════════════════
 33-POINT ANALYSIS PROTOCOL (Credit Manifesto + SOP)
 ═══════════════════════════════════════════════════════════════
 
-For EACH account on the credit report, systematically check ALL 33 categories below.
+For EACH DEROGATORY account (per the ACCOUNT SCOPE rule above), systematically check ALL 33 categories below.
 RULE: Every category that has a label on the report MUST have data — blank fields, dashes, or $0 where a real value should be = VIOLATION.
 RULE: If a category exists on the report but has no data, that is INCOMPLETE REPORTING (FCRA §1681e(b)).
 RULE: Experian and TransUnion are notorious for missing Date of First Delinquency — ALWAYS flag if missing.
@@ -252,7 +266,7 @@ Use ONLY what appears on the report itself: the Account Information section, the
 the Remarks/Comments/Status/Removal date/Date updated fields, and (if multiple bureau reports are
 provided) the same account across bureaus. Never rely on outside documents or assumptions.
 
-G. PAYMENT HISTORY GRID vs ACCOUNT INFORMATION — for each account, explicitly compare:
+G. PAYMENT HISTORY GRID vs ACCOUNT INFORMATION — for each derogatory account, explicitly compare:
    - last payment date vs what the payment history grid shows for that month
    - last payment amount vs payment history
    - account status vs grid progression
@@ -290,9 +304,26 @@ J. PLAIN-LANGUAGE DISPUTE WORDING — for every violation, also write a "dispute
      contradictory. Please fix or delete this entire account."
 
 K. MARKUP LOCATIONS — for every violation, record where on the report it is visible so it can be
-   boxed in red with a numbered callout. Use the PDF page number the field appears on. If a
-   contradiction involves two locations (e.g. a field in Account Information AND a month cell in the
-   Payment History grid), list BOTH locations — both get the same callout number.
+   boxed in red. Use the PDF page number the field appears on. If a contradiction involves two
+   locations (e.g. a field in Account Information AND a month cell in the Payment History grid),
+   list BOTH locations — both get boxed for the same item.
+   markText QUOTING RULES (the box is placed by searching the page text, so markText MUST be findable):
+   - markText must be text LITERALLY printed on the page. NEVER use "...", "■", or bracketed
+     descriptions like "[blank cell]" or "[checkmark Sep]" — those strings do not exist on the page.
+   - For a blank/missing month cell in the Payment History grid, use the year row: "2026 row".
+   - For a row in the 24 Month History table, use the row's leading date: "06/25 row".
+   - For a labeled field, quote label and value exactly: "Scheduled Payment Amount:" or "Balance: $932".
+   WHAT GETS A BOX — HIGHLIGHTING SWEEP RULES (every box must show something WRONG at that exact spot;
+   a reader looking at any box must see the defect right there):
+   - Single-field defect (blank, missing, $0 where a real value belongs, wrong value): box THAT FIELD ONLY.
+   - Contradiction between two fields: box BOTH fields — both values are part of the dispute.
+   - Payment-grid defect (blank cells, missing months, illogical delinquency progression): box the year
+     row(s) where the defect is visible — NOTHING else.
+   - NEVER box a healthy, correctly-populated field as "context", "reference", or "supporting evidence"
+     for a defect that lives somewhere else. If the field's own reporting is fine, it gets NO box.
+   - DATE OF 1ST DELINQUENCY: box it ONLY when the field itself is blank/missing. A populated DOFD is
+     NEVER boxed — for delinquency-progression issues, box the payment-history year row(s) instead.
+   - TRUNCATED ACCOUNT NUMBER: the box goes on the Account Number field ("Account Number: *0725").
 
 ═══════════════════════════════════════════════════════════════
 OUTPUT FORMAT
@@ -384,7 +415,7 @@ IMPORTANT QUALITY RULES:
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
 - Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.
-- EVERY violation MUST include issueType, disputeWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (same callout number).
+- EVERY violation MUST include issueType, disputeWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (both belong to the same item).
 - Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
 - Never claim fraud or identity theft unless the report itself supports it.`;
 
@@ -442,6 +473,92 @@ IMPORTANT QUALITY RULES:
       });
     }
 
+    // Deterministic guards — enforce the highlighting rules even when the model slips.
+    if (violationsData.furnishers) {
+      for (const f of violationsData.furnishers) {
+        const accounts = f.accounts || [];
+        const violations = f.violations || [];
+
+        // Guard 1: a populated Date of 1st Delinquency is never boxed. Drop any
+        // markup entry pointing at a filled-in DOFD field (the defect those
+        // violations describe lives in the payment grid, which stays boxed) —
+        // but never drop a violation's last remaining markup location.
+        for (const v of violations) {
+          if (!v.markup || v.markup.length < 2) continue;
+          const acct = accounts.find(a => a.accountName === v.accountName) || {};
+          if (!acct.dofd) continue;
+          const kept = v.markup.filter(m => !/date of (1st|first) delinquency|DOFD/i.test(String(m.markText || '')));
+          if (kept.length > 0) v.markup = kept;
+        }
+
+        // Injected violations get their box on the account's own page — taken
+        // from the account's other violations' markup entries.
+        const pageOfAccount = (acctName) => {
+          for (const v of violations) {
+            if (v.accountName !== acctName) continue;
+            for (const m of (v.markup || [])) if (m.page != null) return m.page;
+          }
+          return null;
+        };
+
+        // Guard 2: every account whose displayed number is masked (*/X) must
+        // carry the truncated-account-number violation (Gillespie). Inject the
+        // standard violation if the model omitted it.
+        for (const acct of accounts) {
+          const num = String(acct.accountNumber || '');
+          if (!/[*X]/i.test(num) || /NOT VISIBLE/i.test(num)) continue;
+          const has = violations.some(v =>
+            v.accountName === acct.accountName &&
+            /TRUNCAT|ACCOUNT NUMBER/i.test(String(v.title || '')));
+          if (has) continue;
+          console.log(`[${sessionId}] Guard: injecting truncated-account-number violation for ${f.name} (${num})`);
+          violations.unshift({
+            accountName: acct.accountName,
+            title: 'TRUNCATED ACCOUNT NUMBER PREVENTS CONSUMER VERIFICATION',
+            severity: 'CRITICAL',
+            statute: 'FCRA §1681g(a)(1); Gillespie v. Equifax Info. Servs. LLC',
+            issueType: 'Incomplete field',
+            reportShows: num,
+            shouldShow: 'Full account number sufficient for the consumer to identify and verify the account',
+            description: `The account number is displayed as "${num}" — masked to the point that the consumer cannot independently verify that this tradeline belongs to them or match it against their own records.`,
+            impact: 'The consumer cannot verify the account, dispute specific entries, or confirm the tradeline is theirs (Gillespie v. Equifax).',
+            precedent: 'Gillespie v. Equifax Info. Servs. LLC',
+            demand: 'Provide the full account number or delete the tradeline.',
+            disputeWording: `The account number is shown only as "${num}." I cannot verify this account from the masked number. Please fix or delete this entire account.`,
+            markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: `Account Number: ${num}` }],
+          });
+        }
+
+        // Guard 3: every derogatory account (all accounts here are, by scope)
+        // with a blank Date of 1st Delinquency must carry the missing-DOFD
+        // violation — category 9, always-flag per the BMB protocol.
+        for (const acct of accounts) {
+          if (acct.dofd) continue;
+          const has = violations.some(v =>
+            v.accountName === acct.accountName &&
+            /DOFD|(FIRST|1ST) DELINQUENCY/i.test(String(v.title || '')));
+          if (has) continue;
+          console.log(`[${sessionId}] Guard: injecting missing-DOFD violation for ${f.name} (${acct.accountName})`);
+          violations.push({
+            accountName: acct.accountName,
+            title: 'DATE OF FIRST DELINQUENCY MISSING',
+            severity: 'CRITICAL',
+            statute: 'FCRA §1681c(a); Metro 2 Field 25',
+            issueType: 'Missing field',
+            reportShows: 'FIELD NOT PRESENT',
+            shouldShow: 'DOFD must be reported so the consumer can determine the 7-year removal date',
+            description: 'The Date of 1st Delinquency field is blank. This account reports derogatory history, so the DOFD is required — without it the consumer cannot determine when the negative information must be removed under the 7-year rule.',
+            impact: 'The consumer cannot verify the 7-year removal timeline or confirm the delinquency is being aged correctly (FCRA §1681c(a)).',
+            precedent: null,
+            demand: 'Report the accurate Date of 1st Delinquency or delete the tradeline.',
+            disputeWording: 'What was the date of first delinquency? Please fix or delete this entire account.',
+            markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: 'Date of 1st Delinquency:' }],
+          });
+        }
+        f.violations = violations;
+      }
+    }
+
     // Recompute summary counts from actual violation severity badges (not Claude's summary)
     if (violationsData.furnishers) {
       let total = 0, critical = 0, high = 0, medium = 0;
@@ -480,7 +597,7 @@ IMPORTANT QUALITY RULES:
     await generateFactualDisputeLetterDocx(violationsData, factualPath);
     generatedFiles.push({ name: 'Factual_Dispute_Letter.docx', path: factualPath, label: 'Factual One-Round Dispute Letter' });
 
-    // Markup Map (red boxes + numbered callouts, matches factual letter numbering)
+    // Markup Map (red box locations; item numbers match the factual letter)
     const markupPath = path.join(outputDir, 'Markup_Map.docx');
     await generateMarkupMapDocx(violationsData, markupPath);
     generatedFiles.push({ name: 'Markup_Map.docx', path: markupPath, label: 'Markup Map (Red Box Guide)' });
@@ -510,8 +627,8 @@ IMPORTANT QUALITY RULES:
     fs.writeFileSync(path.join(outputDir, 'violations_data.json'), JSON.stringify(violationsData, null, 2), 'utf8');
 
     // Original + annotated credit report copies (PDF uploads only).
-    // The original is kept untouched; the annotated copy gets red boxes and
-    // numbered callouts matching the Factual Dispute Letter / Markup Map.
+    // The original is kept untouched; the annotated copy gets red boxes only
+    // (no numbering) at the locations listed in the Markup Map.
     for (const file of req.files) {
       if (path.extname(file.originalname).toLowerCase() !== '.pdf') continue;
       const base = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9_-]/g, '_');
