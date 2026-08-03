@@ -9,7 +9,7 @@ const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const { generateDisputeLetterDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateHighlightingGuideDocx, generateFactualDisputeLetterDocx, generateMarkupMapDocx } = require('./docx-generator');
-const { annotateCreditReportPdf } = require('./pdf-annotator');
+const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -84,6 +84,44 @@ async function loadKnowledge() {
 
 // ─── Anthropic client ─────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─── Truncated-JSON salvage ───────────────────────────────────────────────────
+// Returns the closing brackets needed to balance `s`, or null if `s` ends inside a string.
+function unclosedBrackets(s) {
+  const stack = [];
+  let inString = false, escaped = false;
+  for (const ch of s) {
+    if (escaped) { escaped = false; continue; }
+    if (inString) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') stack.push(ch);
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+  if (inString) return null;
+  return stack.reverse().map((ch) => (ch === '{' ? '}' : ']')).join('');
+}
+
+// Repair JSON cut off mid-generation: walk back to the last complete object
+// boundary, then close every bracket still open at that point. The tail past
+// the last complete violation/account is lost; everything before it survives.
+function repairTruncatedJson(text) {
+  const s = text.trim();
+  for (let end = s.length; end > 0;) {
+    const idx = s.lastIndexOf('}', end - 1);
+    if (idx === -1) return null;
+    const candidate = s.slice(0, idx + 1);
+    const closers = unclosedBrackets(candidate);
+    if (closers !== null) {
+      try { return JSON.parse(candidate + closers); } catch { /* walk further back */ }
+    }
+    end = idx;
+  }
+  return null;
+}
 
 // ─── POST /analyze ────────────────────────────────────────────────────────────
 app.post('/analyze', (req, res, next) => {
@@ -419,35 +457,75 @@ IMPORTANT QUALITY RULES:
 - Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
 - Never claim fraud or identity theft unless the report itself supports it.`;
 
+    // Snapshot mode: image uploads have no text layer to search, so the red
+    // boxes must come from model-supplied coordinates instead.
+    const hasImageUpload = req.files.some((f) => path.extname(f.originalname).toLowerCase() !== '.pdf');
+    if (hasImageUpload) {
+      userContentBlocks.unshift({
+        type: 'text',
+        text: `SNAPSHOT MODE — IMAGE UPLOADS (applies because at least one uploaded file is an image, not a PDF):
+The upload is a screenshot/photo of a report section, so red boxes are placed by COORDINATES, not text search. For EVERY markup entry, ADD a "bbox" field: [x0, y0, x1, y1] on a 0–1000 normalized grid where (0,0) is the TOP-LEFT corner of that image and (1000,1000) is the BOTTOM-RIGHT. x0,y0 is the box's top-left corner; x1,y1 is its bottom-right. The box must TIGHTLY enclose ONLY the exact field, value, or grid row named in markText — small padding is fine, never the whole page or a whole section. For "page", use the 1-based position of the image among the uploaded files (first uploaded image = 1). The annotated report is generated directly from these coordinates, so their accuracy is critical.
+If the uploads include the report's first/header pages, read the consumer name, address, report date, and bureau from them — but do NOT analyze accounts shown there for violations unless they are derogatory tradelines.`,
+      });
+    }
     userContentBlocks.unshift({ type: 'text', text: powerPrompt });
 
     // Call Claude
     console.log(`[${sessionId}] Calling Claude API with ${req.files.length} file(s)...`);
     // Stream the response — Sonnet 4.6 supports up to 64K output tokens, but the SDK
     // requires streaming at that size to avoid HTTP timeouts on long generations.
-    const stream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 64000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userContentBlocks }],
-    });
-    const response = await stream.finalMessage();
-
-    const textBlock = response.content.find((b) => b.type === 'text');
-    const responseText = textBlock ? textBlock.text : '';
-    console.log(`[${sessionId}] Claude response received (${Math.round(responseText.length / 1000)}k chars, stop_reason=${response.stop_reason})`);
-    if (response.stop_reason === 'max_tokens') {
-      console.warn(`[${sessionId}] WARNING: hit max_tokens cap — JSON may be truncated.`);
+    // 64K is the model's output ceiling; a big report can exceed it. When that
+    // happens, feed the partial text back as an assistant prefill so the model
+    // continues exactly where it stopped, and stitch the rounds together.
+    const baseMessages = [{ role: 'user', content: userContentBlocks }];
+    const MAX_CONTINUATIONS = 3;
+    let responseText = '';
+    let stopReason = null;
+    for (let round = 0; round <= MAX_CONTINUATIONS; round++) {
+      // The API rejects assistant prefill ending in whitespace — trim before resuming.
+      responseText = responseText.replace(/\s+$/, '');
+      const messages = responseText
+        ? [...baseMessages, { role: 'assistant', content: responseText }]
+        : baseMessages;
+      const stream = anthropic.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 64000,
+        system: SYSTEM_PROMPT,
+        messages,
+      });
+      const response = await stream.finalMessage();
+      const textBlock = response.content.find((b) => b.type === 'text');
+      responseText += textBlock ? textBlock.text : '';
+      stopReason = response.stop_reason;
+      console.log(`[${sessionId}] Claude round ${round + 1}: ${Math.round(responseText.length / 1000)}k chars total, stop_reason=${stopReason}`);
+      if (stopReason !== 'max_tokens') break;
+      console.warn(`[${sessionId}] Hit max_tokens — requesting continuation ${round + 1}/${MAX_CONTINUATIONS}...`);
     }
 
-    // Parse JSON block
+    // Keep the raw response on disk so a bad parse is always diagnosable.
+    const outputDir = path.join(__dirname, 'outputs', sessionId);
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(path.join(outputDir, 'raw_response.txt'), responseText);
+
+    // Parse JSON block — tolerate a truncated response (missing closing tag,
+    // cut-off JSON) by repairing the tail instead of discarding the analysis.
     let violationsData = null;
     const jsonMatch = responseText.match(/<VIOLATIONS_JSON>([\s\S]*?)<\/VIOLATIONS_JSON>/);
-    if (jsonMatch) {
+    let jsonText = jsonMatch ? jsonMatch[1] : null;
+    if (!jsonText) {
+      const openIdx = responseText.indexOf('<VIOLATIONS_JSON>');
+      if (openIdx !== -1) {
+        console.warn(`[${sessionId}] Closing tag missing — attempting truncated-JSON salvage.`);
+        jsonText = responseText.slice(openIdx + '<VIOLATIONS_JSON>'.length);
+      }
+    }
+    if (jsonText) {
       try {
-        violationsData = JSON.parse(jsonMatch[1].trim());
+        violationsData = JSON.parse(jsonText.trim());
       } catch (e) {
-        console.warn(`[${sessionId}] JSON parse failed:`, e.message);
+        violationsData = repairTruncatedJson(jsonText);
+        if (violationsData) console.warn(`[${sessionId}] Recovered analysis via truncation repair.`);
+        else console.warn(`[${sessionId}] JSON parse failed even after repair:`, e.message);
       }
     }
 
@@ -462,6 +540,21 @@ IMPORTANT QUALITY RULES:
         mailingInstructions: responseText,
         highlightingGuide: '',
       };
+    }
+
+    // Bureau resolution: the UI dropdown wins; otherwise the bureau the model
+    // read off the pages. Never guess — a snapshot with no bureau visible and
+    // no dropdown choice is an error, not an Experian default.
+    const bureauChoice = String(req.body.bureau || 'auto').toLowerCase();
+    const BUREAU_LABELS = { experian: 'Experian', equifax: 'Equifax', transunion: 'TransUnion' };
+    violationsData.consumer = violationsData.consumer || {};
+    if (BUREAU_LABELS[bureauChoice]) {
+      violationsData.consumer.bureau = BUREAU_LABELS[bureauChoice];
+    } else if (!/experian|equifax|transunion/i.test(String(violationsData.consumer.bureau || ''))) {
+      console.warn(`[${sessionId}] Bureau undetectable and no dropdown choice — rejecting run.`);
+      return res.status(422).json({
+        error: 'Could not detect which credit bureau this report is from. Select Equifax, Experian, or TransUnion in the Credit Bureau dropdown and run the analysis again.',
+      });
     }
 
     // Filter out CRA-as-furnisher entries (TransUnion/Experian/Equifax are CRAs, not furnishers)
@@ -573,9 +666,7 @@ IMPORTANT QUALITY RULES:
       violationsData.summary = { total, critical, high, medium };
     }
 
-    // Generate output files
-    const outputDir = path.join(__dirname, 'outputs', sessionId);
-    fs.mkdirSync(outputDir, { recursive: true });
+    // Generate output files (outputDir already created for the raw-response dump)
 
     const generatedFiles = [];
 
@@ -626,25 +717,63 @@ IMPORTANT QUALITY RULES:
     // Persist parsed violations JSON (debugging + re-annotation without re-analyzing)
     fs.writeFileSync(path.join(outputDir, 'violations_data.json'), JSON.stringify(violationsData, null, 2), 'utf8');
 
-    // Original + annotated credit report copies (PDF uploads only).
+    // Original + annotated credit report copies.
     // The original is kept untouched; the annotated copy gets red boxes only
     // (no numbering) at the locations listed in the Markup Map.
+    // Full-report mode (PDF): boxes are placed by searching the text layer.
+    // Snapshot mode (image): boxes come from model-supplied bbox coordinates.
+    let imageIndex = 0;
     for (const file of req.files) {
-      if (path.extname(file.originalname).toLowerCase() !== '.pdf') continue;
+      const ext = path.extname(file.originalname).toLowerCase();
+      const isPdf = ext === '.pdf';
+      if (!isPdf) imageIndex++;
       const base = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9_-]/g, '_');
       try {
-        const originalName = `Original_Credit_Report_${base}.pdf`;
+        const originalName = `Original_Credit_Report_${base}${ext}`;
         const originalCopy = path.join(outputDir, originalName);
         fs.copyFileSync(file.path, originalCopy);
         generatedFiles.push({ name: originalName, path: originalCopy, label: `Original Credit Report — ${file.originalname}` });
 
         const annotatedName = `Annotated_Credit_Report_${base}.pdf`;
         const annotatedPath = path.join(outputDir, annotatedName);
-        const stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath);
+        let stats;
+        if (isPdf) {
+          stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath);
+        } else {
+          // Preferred: OCR gives exact word positions, so boxes land by text
+          // search just like the PDF path. Model bbox coordinates (plus a
+          // self-correction pass) are the fallback when OCR is unavailable.
+          try {
+            stats = await annotateImageSnapshotOcr(file.path, violationsData, annotatedPath, imageIndex);
+            console.log(`[${sessionId}] Snapshot annotated via OCR text search`);
+          } catch (ocrErr) {
+            console.warn(`[${sessionId}] OCR annotation unavailable (${ocrErr.message}) — using model coordinates`);
+            stats = await annotateImageSnapshot(file.path, violationsData, annotatedPath, imageIndex);
+            if (stats.located > 0) {
+              try {
+                const corrected = await refineSnapshotBoxes(anthropic, file.path, annotatedPath, violationsData, imageIndex);
+                if (corrected > 0) {
+                  stats = await annotateImageSnapshot(file.path, violationsData, annotatedPath, imageIndex);
+                  console.log(`[${sessionId}] Box self-correction adjusted ${corrected} box(es) on ${file.originalname}`);
+                  fs.writeFileSync(path.join(outputDir, 'violations_data.json'), JSON.stringify(violationsData, null, 2), 'utf8');
+                }
+              } catch (e) {
+                console.warn(`[${sessionId}] Box self-correction skipped for ${file.originalname}:`, e.message);
+              }
+            }
+          }
+        }
         console.log(`[${sessionId}] Annotated ${file.originalname}: ${stats.located}/${stats.totalItems} items boxed${stats.missed.length ? ` (not located: ${stats.missed.map(m => m.item).join(', ')})` : ''}`);
-        generatedFiles.push({ name: annotatedName, path: annotatedPath, label: `Annotated Credit Report (red boxes) — ${file.originalname}` });
+        if (stats.located > 0) {
+          generatedFiles.push({ name: annotatedName, path: annotatedPath, label: `Annotated Credit Report (red boxes) — ${file.originalname}` });
+        } else {
+          // No boxes landed on this file (e.g. header pages) — an unmarked
+          // "annotated" copy is just a confusing duplicate of the original.
+          fs.rmSync(annotatedPath, { force: true });
+          console.log(`[${sessionId}] No boxes on ${file.originalname} — annotated copy omitted.`);
+        }
       } catch (e) {
-        console.warn(`[${sessionId}] PDF annotation failed for ${file.originalname}:`, e.message);
+        console.warn(`[${sessionId}] Annotation failed for ${file.originalname}:`, e.message);
       }
     }
 

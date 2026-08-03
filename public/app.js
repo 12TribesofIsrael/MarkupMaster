@@ -70,6 +70,11 @@ async function startAnalysis() {
   clearError();
   if (files.length === 0) return;
 
+  const bureau = document.getElementById('bureauSelect').value;
+  if (bureau === 'auto' && !confirm(
+    'Bureau is set to Auto-detect. That works when the uploaded pages show the bureau name (a full report, or the report\'s first pages included with your snapshot).\n\nFor a single-account snapshot alone, click Cancel and pick the bureau from the dropdown.\n\nContinue with auto-detect?'
+  )) return;
+
   setStep(2);
   document.getElementById('uploadSection').style.display = 'none';
   document.getElementById('progressSection').style.display = 'block';
@@ -79,6 +84,7 @@ async function startAnalysis() {
   startProgressAnimation();
 
   const formData = new FormData();
+  formData.append('bureau', document.getElementById('bureauSelect').value);
   files.forEach(f => formData.append('files', f));
 
   try {

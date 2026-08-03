@@ -3,6 +3,9 @@
 // violation's markup[] entries (page + markText); text positions are found by
 // searching the PDF's own text layer, so boxes land on the real field text.
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { PDFDocument, rgb } = require('pdf-lib');
 
 let pdfjsLib = null;
@@ -44,30 +47,34 @@ async function extractPageLines(pdfBuffer) {
         h: i.height || Math.abs(i.transform[3]) || 9,
       }));
 
-    // Group items into lines by baseline proximity
-    const lines = [];
-    for (const it of items) {
-      const line = lines.find(L => Math.abs(L.y - it.y) < 3);
-      if (line) line.items.push(it);
-      else lines.push({ y: it.y, items: [it] });
-    }
-    for (const L of lines) {
-      L.items.sort((a, b) => a.x - b.x);
-      // Normalized line text with per-item character ranges, so a match can be
-      // mapped back to just the items (columns) it actually covers.
-      let text = '';
-      L.ranges = [];
-      for (const it of L.items) {
-        const n = normalize(it.str);
-        if (text) text += ' ';
-        L.ranges.push({ start: text.length, end: text.length + n.length, item: it });
-        text += n;
-      }
-      L.text = text;
-    }
-    pages.push({ lines });
+    pages.push({ lines: groupIntoLines(items, 3) });
   }
   return pages;
+}
+
+// Group text items into visual lines by baseline proximity, then build each
+// line's normalized text with per-item character ranges, so a match can be
+// mapped back to just the items (columns) it actually covers.
+function groupIntoLines(items, tol) {
+  const lines = [];
+  for (const it of items) {
+    const line = lines.find(L => Math.abs(L.y - it.y) < tol);
+    if (line) line.items.push(it);
+    else lines.push({ y: it.y, items: [it] });
+  }
+  for (const L of lines) {
+    L.items.sort((a, b) => a.x - b.x);
+    let text = '';
+    L.ranges = [];
+    for (const it of L.items) {
+      const n = normalize(it.str);
+      if (text) text += ' ';
+      L.ranges.push({ start: text.length, end: text.length + n.length, item: it });
+      text += n;
+    }
+    L.text = text;
+  }
+  return lines;
 }
 
 // markText sometimes arrives as a description rather than a quote — with "..."
@@ -130,10 +137,14 @@ function findYearRow(pages, pageHint, year) {
         rowMaxX = Math.max(rowMaxX, Math.max(...L.items.map(i => i.x + i.w)));
       }
     }
+    // When no fully-populated grid row exists to copy the width from (sparse
+    // OCR of a snapshot), extend to the rightmost text on the page instead of
+    // the letter-page default of 540pt.
+    const pageMaxX = Math.max(540, ...lines.flatMap(L => L.items.map(i => i.x + i.w)));
     for (const L of lines) {
       if (L.text === year || L.text.startsWith(year + ' ')) {
         if (L.items.length >= 6) return { pageIndex: pi, line: L, items: L.items };
-        return { pageIndex: pi, line: L, items: L.items, extendToX: rowMaxX || 540 };
+        return { pageIndex: pi, line: L, items: L.items, extendToX: rowMaxX || pageMaxX };
       }
     }
   }
@@ -205,17 +216,17 @@ function findLine(pages, pageHint, cands) {
 }
 
 /**
- * Annotate a copy of the credit report PDF with red boxes only — no numbering.
- * (Numbered callouts were removed on purpose: they drifted out of sync with the
- * Factual Dispute Letter's item numbers. The box location itself identifies the
- * disputed field.) Returns { totalItems, located, missed }.
+ * Shared matching + drawing core. Finds each markup entry's text in the
+ * extracted page lines and draws a red box over the matched items.
+ * `markFilter(m)` returns the local 1-based page hint for a markup entry, or
+ * null to skip it (used by snapshot mode, where entries reference other files).
+ * Returns { totalItems, located, missed }.
  */
-async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath) {
-  const buffer = fs.readFileSync(inputPdfPath);
-  const pages = await extractPageLines(buffer);
-
-  const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
-  const pdfPages = pdfDoc.getPages();
+function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}) {
+  const padX = style.padX != null ? style.padX : 2.5;
+  const padTop = style.padTop != null ? style.padTop : 2.5;
+  const padBottom = style.padBottom != null ? style.padBottom : 2.5;
+  const borderWidth = style.lineWidth || 1.4;
 
   let itemNo = 0;
   let located = 0;
@@ -225,30 +236,33 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath)
   for (const f of (violationsData.furnishers || [])) {
     for (const v of (f.violations || [])) {
       itemNo++;
-      const marks = (v.markup && v.markup.length > 0) ? v.markup : [];
-      if (marks.length === 0) {
+      const allMarks = v.markup || [];
+      if (allMarks.length === 0) {
         missed.push({ item: itemNo, reason: 'no markup data', text: v.title || '' });
         continue;
       }
+      const marks = allMarks.filter(m => markFilter(m) != null);
+      if (marks.length === 0) continue; // this violation's marks live on another file
 
       let anyHit = false;
       for (const m of marks) {
+        const hint = markFilter(m);
         const clean = sanitizeMarkText(m.markText);
         let hit = null;
         const yearRow = clean.match(/^((?:19|20)\d{2})\b/);
-        if (yearRow) hit = findYearRow(pages, m.page, yearRow[1]);
+        if (yearRow) hit = findYearRow(pages, hint, yearRow[1]);
         if (!hit) {
           const cands = candidatesFor(clean);
-          hit = cands.length ? findLine(pages, m.page, cands) : null;
+          hit = cands.length ? findLine(pages, hint, cands) : null;
         }
         if (!hit) {
           const lead = clean.match(/^(\d{2}\/\d{2})\b/);
-          if (lead) hit = findRowByLeadingToken(pages, m.page, lead[1]);
+          if (lead) hit = findRowByLeadingToken(pages, hint, lead[1]);
         }
         // Guaranteed fallbacks: every dispute item must show at least one box.
         // Box the section heading, else the furnisher heading, on the stated page.
-        if (!hit) hit = findOnPage(pages, (m.page || 0) - 1, m.section);
-        if (!hit) hit = findOnPage(pages, (m.page || 0) - 1, f.name);
+        if (!hit) hit = findOnPage(pages, (hint || 0) - 1, m.section);
+        if (!hit) hit = findOnPage(pages, (hint || 0) - 1, f.name);
         if (!hit) continue;
         anyHit = true;
 
@@ -261,21 +275,21 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath)
         // If this box lands where one was already drawn (two items sharing a
         // field, or fallbacks sharing a heading), grow the padding so the boxes
         // nest visibly instead of overprinting as one.
-        let pad = 2.5;
+        let grow = 0;
         let box;
         do {
           box = {
-            x: minX - pad,
-            y: L.y - pad,
-            width: (maxX - minX) + pad * 2,
-            height: maxH + pad * 2,
+            x: minX - padX - grow,
+            y: L.y - padBottom - grow,
+            width: (maxX - minX) + (padX + grow) * 2,
+            height: maxH + padTop + padBottom + grow * 2,
           };
-          pad += 3;
+          grow += 3;
         } while (drawnBoxes.some(b => b.p === hit.pageIndex &&
           Math.abs(b.x - box.x) < 2 && Math.abs(b.y - box.y) < 2 &&
           Math.abs(b.width - box.width) < 4 && Math.abs(b.height - box.height) < 4));
         drawnBoxes.push({ p: hit.pageIndex, ...box });
-        pg.drawRectangle({ ...box, borderColor: RED, borderWidth: 1.4 });
+        pg.drawRectangle({ ...box, borderColor: RED, borderWidth });
       }
 
       if (anyHit) located++;
@@ -283,8 +297,203 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath)
     }
   }
 
+  return { totalItems: itemNo, located, missed };
+}
+
+/**
+ * Annotate a copy of the credit report PDF with red boxes only — no numbering.
+ * (Numbered callouts were removed on purpose: they drifted out of sync with the
+ * Factual Dispute Letter's item numbers. The box location itself identifies the
+ * disputed field.) Returns { totalItems, located, missed }.
+ */
+async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath) {
+  const buffer = fs.readFileSync(inputPdfPath);
+  const pages = await extractPageLines(buffer);
+
+  const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+  const pdfPages = pdfDoc.getPages();
+
+  const stats = drawMarkupBoxes(pages, pdfPages, violationsData, m => m.page);
+
+  fs.writeFileSync(outputPath, await pdfDoc.save());
+  return stats;
+}
+
+/**
+ * Snapshot mode, OCR path (preferred): tesseract reads the image's words with
+ * exact pixel positions, and boxes are then placed by the same text-search
+ * logic the PDF mode uses — no model coordinates involved. Throws if the OCR
+ * engine is unavailable; callers fall back to annotateImageSnapshot.
+ */
+async function annotateImageSnapshotOcr(imagePath, violationsData, outputPath, imageIndex = 1) {
+  const raw = execFileSync('python', [path.join(__dirname, 'ocr_words.py'), imagePath],
+    { maxBuffer: 32 * 1024 * 1024, timeout: 60000 }).toString();
+  const words = JSON.parse(raw);
+  if (!Array.isArray(words) || words.length === 0) throw new Error('OCR returned no words');
+
+  const bytes = fs.readFileSync(imagePath);
+  const pdfDoc = await PDFDocument.create();
+  const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
+  const img = isPng ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
+  const { width, height } = img.scale(1);
+  const page = pdfDoc.addPage([width, height]);
+  page.drawImage(img, { x: 0, y: 0, width, height });
+
+  // OCR pixel coords (origin top-left) → page coords (origin bottom-left).
+  // OCR baselines jitter more than PDF text runs, so group lines loosely.
+  const items = words.map(w => ({ str: w.t, x: w.x, y: height - (w.y + w.h), w: w.w, h: w.h }));
+  const pages = [{ lines: groupIntoLines(items, 7) }];
+
+  const stats = drawMarkupBoxes(pages, [page], violationsData,
+    m => ((m.page || 1) === imageIndex ? 1 : null),
+    { padX: Math.max(4, width * 0.004), padTop: 4, padBottom: 5, lineWidth: Math.max(1.5, width / 450) });
+
+  fs.writeFileSync(outputPath, await pdfDoc.save());
+  return stats;
+}
+
+/**
+ * Snapshot mode — the upload is an image, so there is no text layer to search.
+ * Boxes come from each markup entry's model-supplied bbox ([x0,y0,x1,y1] on a
+ * 0–1000 grid, origin top-left). The image is embedded on a PDF page at its
+ * native size and red rectangles are drawn over it. `imageIndex` is the 1-based
+ * position of this image among the uploaded files (markup.page refers to it).
+ * Returns { totalItems, located, missed } like annotateCreditReportPdf.
+ */
+async function annotateImageSnapshot(imagePath, violationsData, outputPath, imageIndex = 1) {
+  const bytes = fs.readFileSync(imagePath);
+  const pdfDoc = await PDFDocument.create();
+  const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
+  const img = isPng ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
+  const { width, height } = img.scale(1);
+  const page = pdfDoc.addPage([width, height]);
+  page.drawImage(img, { x: 0, y: 0, width, height });
+
+  const lineW = Math.max(1.5, width / 450);
+  let itemNo = 0;
+  let located = 0;
+  const missed = [];
+  const drawn = [];
+
+  for (const f of (violationsData.furnishers || [])) {
+    for (const v of (f.violations || [])) {
+      itemNo++;
+      let anyHit = false;
+      let onThisImage = false;
+      for (const m of (v.markup || [])) {
+        if ((m.page || 1) !== imageIndex) continue;
+        onThisImage = true;
+        const b = m.bbox;
+        if (!Array.isArray(b) || b.length !== 4) continue;
+        let [x0, y0, x1, y1] = b.map(Number);
+        if (![x0, y0, x1, y1].every(Number.isFinite)) continue;
+        if (x1 < x0) [x0, x1] = [x1, x0];
+        if (y1 < y0) [y0, y1] = [y1, y0];
+        // Reject degenerate slivers and whole-page boxes
+        if ((x1 - x0) < 5 || (y1 - y0) < 3) continue;
+        if ((x1 - x0) > 980 && (y1 - y0) > 980) continue;
+        anyHit = true;
+        // 0–1000 grid with origin top-left → PDF points with origin bottom-left.
+        // Model bboxes trend a few pixels high, so pad the bottom harder than
+        // the top to keep the field fully enclosed instead of struck through.
+        // If a box lands where one already is, grow it so the two nest visibly.
+        // Model coordinates jitter ~half a text line vertically, so the boxes
+        // are padded a full half-line both ways: roomy beats struck-through.
+        const padX = Math.max(4, width * 0.005);
+        const padTop = Math.max(6, height * 0.011);
+        const padBottom = Math.max(8, height * 0.013);
+        let grow = 0;
+        let box;
+        do {
+          box = {
+            x: (x0 / 1000) * width - padX - grow,
+            y: height - (y1 / 1000) * height - padBottom - grow,
+            width: ((x1 - x0) / 1000) * width + (padX + grow) * 2,
+            height: ((y1 - y0) / 1000) * height + padTop + padBottom + grow * 2,
+          };
+          grow += 4;
+        } while (drawn.some(d => Math.abs(d.x - box.x) < 3 && Math.abs(d.y - box.y) < 3 &&
+          Math.abs(d.width - box.width) < 6 && Math.abs(d.height - box.height) < 6));
+        drawn.push(box);
+        page.drawRectangle({ ...box, borderColor: RED, borderWidth: lineW });
+      }
+      if (anyHit) located++;
+      else if (onThisImage) missed.push({ item: itemNo, text: (v.markup && v.markup[0] && v.markup[0].markText) || v.title || '' });
+    }
+  }
+
   fs.writeFileSync(outputPath, await pdfDoc.save());
   return { totalItems: itemNo, located, missed };
 }
 
-module.exports = { annotateCreditReportPdf };
+/**
+ * Self-correction pass for snapshot boxes. Renders the annotated PDF (via
+ * pymupdf — python must be on PATH), shows the model the original AND the
+ * boxed render with the bbox list, and asks for corrected coordinates for any
+ * box that missed its target. Mutates the markup entries' bbox values in
+ * violationsData and returns how many were corrected (0 = nothing to redraw).
+ */
+async function refineSnapshotBoxes(anthropic, imagePath, annotatedPdfPath, violationsData, imageIndex = 1) {
+  const items = [];
+  for (const f of (violationsData.furnishers || [])) {
+    for (const v of (f.violations || [])) {
+      for (const m of (v.markup || [])) {
+        if ((m.page || 1) !== imageIndex) continue;
+        items.push({ id: items.length, markText: String(m.markText || ''), bbox: m.bbox || null, _m: m });
+      }
+    }
+  }
+  if (items.length === 0) return 0;
+
+  const tmpPng = path.join(os.tmpdir(), `bmb_refine_${Date.now()}.png`);
+  execFileSync('python', [
+    '-c',
+    'import fitz,sys\nd=fitz.open(sys.argv[1])\np=d[0].get_pixmap(matrix=fitz.Matrix(1.5,1.5))\np.save(sys.argv[2])',
+    annotatedPdfPath,
+    tmpPng,
+  ], { timeout: 30000 });
+
+  const imgBlock = (p, mediaType) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: mediaType, data: fs.readFileSync(p).toString('base64') },
+  });
+  const origType = /\.png$/i.test(imagePath) ? 'image/png' : 'image/jpeg';
+
+  const resp = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 4000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'IMAGE 1 — original credit report snapshot:' },
+        imgBlock(imagePath, origType),
+        { type: 'text', text: 'IMAGE 2 — same snapshot with red boxes drawn from the bbox list below:' },
+        imgBlock(tmpPng, 'image/png'),
+        {
+          type: 'text',
+          text: `Each item below drew one red box on IMAGE 2. bbox = [x0,y0,x1,y1] on a 0–1000 normalized grid over the ORIGINAL image, origin at the TOP-LEFT, x0,y0 = box top-left, x1,y1 = box bottom-right. Many boxes sit too high, strike through their text, or float over blank space.\n\nFor EACH item, compare IMAGE 2 against IMAGE 1 and decide whether the red box TIGHTLY encloses the exact text named in markText. Reply with ONLY a JSON array of corrections — [{"id": <id>, "bbox": [x0,y0,x1,y1]}] — giving corrected coordinates for every box that is off (coordinates of where the TARGET TEXT actually is, not where the current box is). Items whose box is already correct are omitted. Reply [] if every box is correct. No text outside the JSON array.\n\n${JSON.stringify(items.map(({ id, markText, bbox }) => ({ id, markText, bbox })))}`,
+        },
+      ],
+    }],
+  });
+  fs.rmSync(tmpPng, { force: true });
+
+  const textBlock = resp.content.find((b) => b.type === 'text');
+  const match = textBlock && textBlock.text.match(/\[[\s\S]*\]/);
+  if (!match) return 0;
+  let corrections;
+  try { corrections = JSON.parse(match[0]); } catch { return 0; }
+
+  let applied = 0;
+  for (const c of (Array.isArray(corrections) ? corrections : [])) {
+    const item = items[c.id];
+    if (!item || !Array.isArray(c.bbox) || c.bbox.length !== 4) continue;
+    const nums = c.bbox.map(Number);
+    if (!nums.every(Number.isFinite)) continue;
+    item._m.bbox = nums;
+    applied++;
+  }
+  return applied;
+}
+
+module.exports = { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes };
