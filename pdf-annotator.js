@@ -220,9 +220,12 @@ function findLine(pages, pageHint, cands) {
  * extracted page lines and draws a red box over the matched items.
  * `markFilter(m)` returns the local 1-based page hint for a markup entry, or
  * null to skip it (used by snapshot mode, where entries reference other files).
+ * `furnisherFilter(f)`, when given, skips a furnisher's violations entirely
+ * (without counting them as missed) — item numbering still advances so it
+ * stays in sync with the letter across sibling files.
  * Returns { totalItems, located, missed }.
  */
-function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}) {
+function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}, furnisherFilter = null) {
   const padX = style.padX != null ? style.padX : 2.5;
   const padTop = style.padTop != null ? style.padTop : 2.5;
   const padBottom = style.padBottom != null ? style.padBottom : 2.5;
@@ -234,8 +237,10 @@ function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}
   const drawnBoxes = []; // {p, x, y, width, height} — to nest coinciding boxes
 
   for (const f of (violationsData.furnishers || [])) {
+    const fOk = !furnisherFilter || furnisherFilter(f);
     for (const v of (f.violations || [])) {
       itemNo++;
+      if (!fOk) continue; // this furnisher's marks live on a sibling file
       const allMarks = v.markup || [];
       if (allMarks.length === 0) {
         missed.push({ item: itemNo, reason: 'no markup data', text: v.title || '' });
@@ -300,20 +305,76 @@ function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}
   return { totalItems: itemNo, located, missed };
 }
 
+// Printed page labels ("Page 8 of 26" in the footer) are the page numbers the
+// model actually cites in markup entries. Single-account extracts keep their
+// original footer, so a 1-page upload of report page 8 maps {8 → local 1}.
+// The lowest text line on each page is checked first — that's where footers live.
+function buildPrintedPageMap(pages) {
+  const map = new Map();
+  pages.forEach((pg, i) => {
+    const byY = [...pg.lines].sort((a, b) => a.y - b.y);
+    for (const L of byY) {
+      const m = L.text.match(/(?:^|\s)page (\d{1,4}) of \d{1,4}(?:\s|$)/);
+      if (!m) continue;
+      const printed = Number(m[1]);
+      if (!map.has(printed)) map.set(printed, i + 1);
+      break;
+    }
+  });
+  return map;
+}
+
 /**
  * Annotate a copy of the credit report PDF with red boxes only — no numbering.
  * (Numbered callouts were removed on purpose: they drifted out of sync with the
  * Factual Dispute Letter's item numbers. The box location itself identifies the
  * disputed field.) Returns { totalItems, located, missed }.
+ *
+ * `opts.scoped` (multi-file uploads): each uploaded PDF is a partial extract of
+ * the same report, so a mark must only be drawn on the file that actually
+ * contains its page — otherwise every generic label ("Date Closed:") gets boxed
+ * on every sibling file, stacking duplicate and misplaced boxes.
  */
-async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath) {
+async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath, opts = {}) {
   const buffer = fs.readFileSync(inputPdfPath);
   const pages = await extractPageLines(buffer);
 
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
   const pdfPages = pdfDoc.getPages();
 
-  const stats = drawMarkupBoxes(pages, pdfPages, violationsData, m => m.page);
+  const pageMap = buildPrintedPageMap(pages);
+  const clamp = (p) => Math.min(Math.max(1, p), pages.length);
+  let markFilter;
+  let furnisherFilter = null;
+  if (opts.scoped && pageMap.size > 0) {
+    // Draw ONLY marks whose printed page lives in this file, at that page's
+    // local index. Marks citing other printed pages belong to sibling uploads.
+    markFilter = (m) => pageMap.get(Number(m.page)) || null;
+  } else if (opts.scoped) {
+    // No printed page labels to scope by — fall back to furnisher-level
+    // scoping: skip a furnisher entirely when neither its account numbers nor
+    // its name appear anywhere in this file's text (e.g. bureau header pages).
+    const docText = pages.flatMap(pg => pg.lines.map(L => L.text)).join('\n');
+    furnisherFilter = (f) => {
+      const nums = (f.accounts || [])
+        .map(a => String(a.accountNumber || '').replace(/\D/g, ''))
+        .filter(d => d.length >= 3);
+      if (nums.some(d => docText.includes(d))) return true;
+      const name = normalize(f.name);
+      return name.length >= 4 && docText.includes(name);
+    };
+    markFilter = (m) => clamp(Number(m.page) || 1);
+  } else {
+    // Single full-report upload: translate printed page → local page when the
+    // footer labels are offset from the physical order; clamp stray hints so
+    // year-row and 24-month-row lookups still run on a real page.
+    markFilter = (m) => {
+      const p = Number(m.page) || 1;
+      return pageMap.get(p) || clamp(p);
+    };
+  }
+
+  const stats = drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, {}, furnisherFilter);
 
   fs.writeFileSync(outputPath, await pdfDoc.save());
   return stats;

@@ -738,7 +738,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
         const annotatedPath = path.join(outputDir, annotatedName);
         let stats;
         if (isPdf) {
-          stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath);
+          stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath, { scoped: req.files.length > 1 });
         } else {
           // Preferred: OCR gives exact word positions, so boxes land by text
           // search just like the PDF path. Model bbox coordinates (plus a
