@@ -452,7 +452,7 @@ IMPORTANT QUALITY RULES:
 - Every violation "reportShows" field must quote the EXACT value from the report.
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
-- Minimum expected violations per account type: Charge-offs 5+, Collections 3+, Delinquent 2+, Late payments 2+.
+- There is NO minimum violation count. Zero violations for an account is a valid and correct result. Never invent, stretch, or pad a violation to reach a count — every dispute must be one the consumer could defend under oath.
 - EVERY violation MUST include issueType, disputeWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (both belong to the same item).
 - Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
 - Never claim fraud or identity theft unless the report itself supports it.`;
@@ -649,6 +649,9 @@ If the uploads include the report's first/header pages, read the consumer name, 
           });
         }
         f.violations = violations;
+        // Renumber sequentially — guard-injected violations carry no number, and
+        // model numbering can drift; letters and the markup map key off this.
+        violations.forEach((v, i) => { v.number = i + 1; });
       }
     }
 
@@ -817,90 +820,6 @@ app.get('/download/:sessionId/:filename', (req, res) => {
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function buildLetterText(furnisher, consumer) {
-  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const violationLines = (furnisher.violations || []).map(v =>
-    `VIOLATION #${v.number}: ${v.title}\n[${v.severity}]\nStatute: ${v.statute}\nFinding: ${v.description}\nDemand: ${v.demand}`
-  ).join('\n\n');
-
-  return `VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED
-Tracking No.: ___________________________
-
-${today}
-
-${consumer.bureau || 'Experian'} Consumer Dispute Department
-Attn: Disputes/Compliance
-
-RE: FORMAL DISPUTE UNDER FCRA §1681i — ${furnisher.name.toUpperCase()} ACCOUNTS
-
-CC: ${furnisher.name}
-${furnisher.address || '[Furnisher Address]'}
-${furnisher.phone || ''}
-
-Consumer: ${consumer.name}
-Address: ${consumer.address}
-Date of Birth: [Redacted]
-SSN (Last 4): [Redacted]
-Report Date: ${consumer.reportDate}
-
-═══════════════════════════════════════════════════
-
-SECTION I — STATUTORY AUTHORITY & CONSUMER RIGHTS
-
-This dispute is submitted pursuant to the Fair Credit Reporting Act (FCRA), 15 U.S.C. §1681 et seq., including:
-• §1681i(a) — Reinvestigation of disputed information
-• §1681e(b) — Maximum possible accuracy requirement
-• §1681g(a) — Full file disclosure
-• §1681s-2(b) — Furnisher duties upon notice of dispute
-• Metro 2® Credit Reporting Standards (CDIA 2023)
-
-═══════════════════════════════════════════════════
-
-SECTION II — DISPUTED ACCOUNTS & VIOLATIONS
-
-${violationLines}
-
-═══════════════════════════════════════════════════
-
-SECTION III — STATUTORY DEMANDS
-
-Pursuant to FCRA §1681i(a), I hereby demand:
-
-A. Conduct a full and reasonable reinvestigation of each disputed item identified above.
-B. Contact the furnisher (${furnisher.name}) and provide all relevant dispute information per §1681i(a)(2).
-C. Provide complete verification of each item or delete it from my consumer file.
-D. Provide full file disclosure per §1681g(a), including method of verification for each item.
-E. Suppress all disputed items during investigation per §1681i(a)(5)(A).
-F. Provide a corrected copy of my consumer disclosure upon completion per §1681i(a)(6).
-G. Forward a description of reinvestigation results to all other consumer reporting agencies per §1681i(a)(6)(B).
-H. Delete any information that cannot be verified within the 30-day deadline per §1681i(a)(5)(A).
-
-═══════════════════════════════════════════════════
-
-COMPLIANCE TIMELINE
-
-Investigation must be completed within 30 days of receipt per FCRA §1681i(a)(1).
-Failure to comply may result in civil litigation under §1681n (willful, up to $1,000 per violation) or §1681o (negligent, actual damages + attorney fees).
-
-═══════════════════════════════════════════════════
-
-CERTIFICATION
-
-I certify under penalty of law that the information provided in this dispute is true and accurate to the best of my knowledge.
-
-Respectfully submitted,
-
-_______________________________
-${consumer.name}
-Date: ${today}
-
-Enclosures:
-□ Government-issued photo ID
-□ Proof of current address
-□ Highlighted copy of credit report
-□ Copy of this dispute letter`;
-}
-
 function generateViolationReportHtml(data) {
   const consumer = data.consumer || {};
   const summary = data.summary || {};
@@ -1010,9 +929,34 @@ async function zipFiles(filePaths, zipPath, baseDir) {
   });
 }
 
+// ─── Outputs retention ────────────────────────────────────────────────────────
+// Session outputs hold consumer PII (reports, letters). Sweep out old session
+// dirs on startup so they don't accumulate forever. Campaign-linked retention
+// replaces this once persistence lands.
+function pruneOldOutputs() {
+  const retentionDays = Number(process.env.OUTPUT_RETENTION_DAYS || 30);
+  const outputsDir = path.join(__dirname, 'outputs');
+  if (!fs.existsSync(outputsDir)) return;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let pruned = 0;
+  for (const entry of fs.readdirSync(outputsDir)) {
+    const dir = path.join(outputsDir, entry);
+    try {
+      const stat = fs.statSync(dir);
+      if (stat.isDirectory() && stat.mtimeMs < cutoff) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        pruned++;
+      }
+    } catch { /* concurrent removal — ignore */ }
+  }
+  if (pruned > 0) console.log(`Pruned ${pruned} output session(s) older than ${retentionDays} days`);
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 loadKnowledge().then(() => {
-  app.listen(PORT, () => {
+  pruneOldOutputs();
+  // Bind to loopback only — outputs and letters carry consumer PII.
+  app.listen(PORT, '127.0.0.1', () => {
     console.log(`\n✅ BMB AI Automation — Markup Mastery Generator running at http://localhost:${PORT}\n`);
   });
 }).catch(err => {

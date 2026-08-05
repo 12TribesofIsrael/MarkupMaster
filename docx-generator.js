@@ -10,18 +10,7 @@ const FONT = 'Times New Roman';
 const FONT_BODY = 11;   // pt  (docx sz = pt * 2)
 const sz = pt => pt * 2;
 
-const CRA_ADDRESSES = {
-  experian:   { name: 'EXPERIAN INFORMATION SOLUTIONS, INC.', dept: 'Consumer Dispute Center', addr: 'P.O. Box 4500', city: 'Allen, TX 75013', phone: '(888) 397-3742' },
-  equifax:    { name: 'EQUIFAX INFORMATION SERVICES, LLC',    dept: 'Office of Consumer Affairs', addr: 'P.O. Box 740256', city: 'Atlanta, GA 30374', phone: '(866) 349-5191' },
-  transunion: { name: 'TRANSUNION, LLC',                      dept: 'Consumer Dispute Center', addr: 'P.O. Box 2000', city: 'Chester, PA 19016', phone: '(800) 916-8800' },
-};
-
-function getCRA(bureauStr) {
-  const b = (bureauStr || '').toLowerCase();
-  if (b.includes('equifax')) return CRA_ADDRESSES.equifax;
-  if (b.includes('trans')) return CRA_ADDRESSES.transunion;
-  return CRA_ADDRESSES.experian; // default
-}
+const { getCRA } = require('./cra-addresses');
 
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
@@ -528,7 +517,7 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
     children.push(makeSubHeading(`PACKAGE ${i + 2}: ${f.name.toUpperCase()}`));
     children.push(makeBody(`Address: ${f.address || '[Furnisher address — see dispute letter CC block]'}`));
     children.push(makeBody('Contents checklist:'));
-    children.push(makeBody('☐  Furnisher demand letter (§1681s-2(b))', { indent: true }));
+    children.push(makeBody('☐  Copy of the dispute letter sent to the CRA', { indent: true }));
     children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
     children.push(makeBody('☐  Proof of current address (dated within 60 days)', { indent: true }));
     children.push(blank(80));
@@ -818,7 +807,7 @@ async function generateMarkupMapDocx(violationsData, outputPath) {
   }
 
   children.push(blank(120));
-  children.push(makeBody('Note: This generator cannot directly edit the PDF/image, but this markup map is complete enough for manual or software-based annotation of the report copy that goes in each mailing package.', { italic: true }));
+  children.push(makeBody('Note: The package also includes an auto-annotated copy of the report with these red boxes already drawn. Use this map to verify each box, or to mark a fresh copy by hand.', { italic: true }));
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);
