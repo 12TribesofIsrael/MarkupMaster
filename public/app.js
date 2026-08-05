@@ -85,6 +85,13 @@ async function startAnalysis() {
 
   const formData = new FormData();
   formData.append('bureau', document.getElementById('bureauSelect').value);
+  formData.append('phone', document.getElementById('idPhone').value.trim());
+  formData.append('phone2', document.getElementById('idPhone2').value.trim());
+  formData.append('email', document.getElementById('idEmail').value.trim());
+  formData.append('dob', document.getElementById('idDob').value.trim());
+  formData.append('ssn', document.getElementById('idSsn').value.trim());
+  formData.append('formerNames', document.getElementById('idFormerNames').value.trim());
+  formData.append('proofOfAddress', document.getElementById('idProof').value.trim());
   files.forEach(f => formData.append('files', f));
 
   try {
@@ -187,6 +194,55 @@ function showResults(data) {
   fileLinks.innerHTML = (data.files || []).map(f =>
     `<a class="file-link" href="${f.url}" download>${f.label}</a>`
   ).join('');
+
+  renderReviewGate(data);
+}
+
+/* ─── Review gate (Watts: can-we-dispute + thrilled-if-deleted, per account) ── */
+function renderReviewGate(data) {
+  const gate = document.getElementById('reviewGate');
+  const items = document.getElementById('reviewItems');
+  const accounts = [];
+  (data.furnishers || []).forEach(f => {
+    const names = (f.accounts && f.accounts.length > 0) ? f.accounts : [f.name];
+    names.forEach(a => accounts.push({ furnisher: f.name, account: a }));
+  });
+
+  if (accounts.length === 0) {
+    gate.style.display = 'none';
+    setDownloadsEnabled(true);
+    return;
+  }
+
+  gate.style.display = 'block';
+  items.innerHTML = accounts.map((a, i) => `
+    <div style="padding:10px 0;border-top:1px solid #fde68a">
+      <div style="font-weight:600;font-size:14px;margin-bottom:6px">${a.furnisher} — ${a.account}</div>
+      <label style="display:block;font-size:13px;margin-bottom:4px">
+        <input type="checkbox" class="gate-check" data-i="${i}"> The disputed information on this account is <strong>actually wrong</strong> — not just unwanted — and I could defend that under oath.
+      </label>
+      <label style="display:block;font-size:13px">
+        <input type="checkbox" class="gate-check" data-i="${i}"> I would be <strong>thrilled if this entire account were deleted</strong> from my report.
+      </label>
+    </div>`).join('');
+
+  setDownloadsEnabled(false);
+  items.querySelectorAll('.gate-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const all = [...items.querySelectorAll('.gate-check')].every(c => c.checked);
+      setDownloadsEnabled(all);
+    });
+  });
+}
+
+function setDownloadsEnabled(enabled) {
+  const zip = document.getElementById('zipDownload');
+  const links = document.getElementById('fileLinks');
+  zip.style.pointerEvents = enabled ? '' : 'none';
+  zip.style.opacity = enabled ? '' : '0.4';
+  links.style.pointerEvents = enabled ? '' : 'none';
+  links.style.opacity = enabled ? '' : '0.4';
+  zip.title = enabled ? '' : 'Complete the review checklist above first';
 }
 
 /* ─── UI Helpers ─────────────────────────────────────────────────────────────── */

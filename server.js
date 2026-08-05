@@ -8,7 +8,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
-const { generateDisputeLetterDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateHighlightingGuideDocx, generateFactualDisputeLetterDocx, generateMarkupMapDocx } = require('./docx-generator');
+const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx } = require('./docx-generator');
 const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
 
 const app = express();
@@ -331,15 +331,45 @@ I. ISSUE CLASSIFICATION — classify every violation with exactly one issueType:
    challenged: it is missing, it conflicts with another part of the same report, it makes the reporting
    incomplete or contradictory, or the tradeline cannot be understood or verified from the face of the report.
 
-J. PLAIN-LANGUAGE DISPUTE WORDING — for every violation, also write a "disputeWording": one or two
-   short, factual, plain-English consumer sentences suitable for a one-round dispute letter.
-   No legal essay, no threats, no overexplaining. Each ends with "Please fix or delete this entire account."
-   Examples of the required style:
-   - "What was the date of first delinquency? Please fix or delete this entire account."
-   - "The Last Payment Date is listed as Aug 14, 2023, but the payment history grid shows no payment
-     that month. How can both be true? Please fix or delete this entire account."
-   - "The account is listed in charge-off status, but the remarks say 'paid in full.' This is
-     contradictory. Please fix or delete this entire account."
+J. PLAIN-LANGUAGE DISPUTE WORDING — for every violation, also write:
+
+   "disputeWording": one or two short, factual, plain-English consumer sentences stating WHAT is
+   wrong and WHY, at the field/month/dollar level. Quote the exact wrong value and where it appears.
+   HARD RULES for disputeWording and remedyWording:
+   - NO statute citations, NO case names, NO "FCRA", NO "Metro 2", NO field numbers, NO legal
+     vocabulary of any kind. These are written by an ordinary consumer describing a factual error.
+     (Statutes and case law belong ONLY in the "statute" and "precedent" fields — those feed an
+     internal memo, never the mailed letter.)
+   - Fact framing only, never a legal argument. Never "this violates my rights" — instead "this
+     is wrong, here is exactly why."
+   - When the defect is the report contradicting itself, SAY SO in that form: "Your own report
+     shows [value A] at [location A] but [value B] at [location B]. Both cannot be true."
+   - For missing data, phrase as a question: "What was the date of first delinquency?"
+   - No threats, no overexplaining, no template-sounding filler.
+
+   "remedyType": exactly one of "correct" | "delete" | "explain" — what the consumer wants for
+   THIS item. Use "correct" when a specific right value or completion is the fix, "delete" when
+   the tradeline cannot be verified or the derogatory reporting is unsupportable, "explain" when
+   the consumer needs information (e.g. a full account number) before anything can be verified.
+
+   "remedyWording": ONE plain-English sentence stating the exact remedy for THIS item, matched to
+   the defect — never a blanket demand. Examples of the required style:
+   - "Please correct the balance from $2,391.47 to $0."
+   - "Please fill in the missing payment history for March 2023 through July 2024, or delete
+     this account if you cannot."
+   - "Please report the correct date of first delinquency, or delete this account."
+   - "Please provide the full account number so I can verify this account, or delete it."
+
+   "internalContradiction": when the defect is the report contradicting itself, an object
+   { "locationA": "...", "valueA": "...", "locationB": "...", "valueB": "..." } naming both spots
+   and both values exactly as printed. Otherwise null.
+
+   Examples of the required disputeWording style:
+   - "What was the date of first delinquency?"
+   - "The Last Payment Date is listed as Aug 14, 2023, but the payment history grid shows no
+     payment that month. How can both be true?"
+   - "The account is listed in charge-off status, but the remarks say 'paid in full.' Both
+     cannot be true."
 
 K. MARKUP LOCATIONS — for every violation, record where on the report it is visible so it can be
    boxed in red. Use the PDF page number the field appears on. If a contradiction involves two
@@ -390,6 +420,7 @@ Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIO
       "name": "Furnisher Name exactly as shown on report",
       "address": "Furnisher Address if visible, or null",
       "phone": "Phone if visible, or null",
+      "isCollector": "true if this furnisher is a collection agency or debt buyer (collection tradelines, 'placed for collection', purchased debt), false if an original creditor, null if unclear",
       "accounts": [
         {
           "accountName": "Exactly as shown on report",
@@ -431,7 +462,10 @@ Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIO
           "impact": "How this harms the consumer or prevents verification",
           "precedent": "Case law citation or null",
           "demand": "Specific remedy: delete, correct, provide documentation, or investigate",
-          "disputeWording": "One or two short factual plain-English sentences for the one-round letter, ending with 'Please fix or delete this entire account.'",
+          "disputeWording": "One or two short factual plain-English sentences per rule J — no statutes, no legal vocabulary, exact values quoted",
+          "remedyType": "correct|delete|explain per rule J",
+          "remedyWording": "One plain-English sentence stating the exact remedy for this item per rule J",
+          "internalContradiction": { "locationA": "where value A appears", "valueA": "exact value A", "locationB": "where value B appears", "valueB": "exact value B" },
           "markup": [
             {
               "page": 3,
@@ -453,7 +487,7 @@ IMPORTANT QUALITY RULES:
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
 - There is NO minimum violation count. Zero violations for an account is a valid and correct result. Never invent, stretch, or pad a violation to reach a count — every dispute must be one the consumer could defend under oath.
-- EVERY violation MUST include issueType, disputeWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (both belong to the same item).
+- EVERY violation MUST include issueType, disputeWording, remedyType, remedyWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (both belong to the same item).
 - Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
 - Never claim fraud or identity theft unless the report itself supports it.`;
 
@@ -617,7 +651,10 @@ If the uploads include the report's first/header pages, read the consumer name, 
             impact: 'The consumer cannot verify the account, dispute specific entries, or confirm the tradeline is theirs (Gillespie v. Equifax).',
             precedent: 'Gillespie v. Equifax Info. Servs. LLC',
             demand: 'Provide the full account number or delete the tradeline.',
-            disputeWording: `The account number is shown only as "${num}." I cannot verify this account from the masked number. Please fix or delete this entire account.`,
+            disputeWording: `The account number is shown only as "${num}." I cannot tell from this masked number whether this account is actually mine.`,
+            remedyType: 'explain',
+            remedyWording: 'Please provide the full account number so I can verify this account, or delete it.',
+            internalContradiction: null,
             markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: `Account Number: ${num}` }],
           });
         }
@@ -644,7 +681,10 @@ If the uploads include the report's first/header pages, read the consumer name, 
             impact: 'The consumer cannot verify the 7-year removal timeline or confirm the delinquency is being aged correctly (FCRA §1681c(a)).',
             precedent: null,
             demand: 'Report the accurate Date of 1st Delinquency or delete the tradeline.',
-            disputeWording: 'What was the date of first delinquency? Please fix or delete this entire account.',
+            disputeWording: 'This account reports late payments, but the Date of 1st Delinquency field is blank. What was the date of first delinquency?',
+            remedyType: 'correct',
+            remedyWording: 'Please report the correct date of first delinquency, or delete this account.',
+            internalContradiction: null,
             markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: 'Date of 1st Delinquency:' }],
           });
         }
@@ -673,43 +713,43 @@ If the uploads include the report's first/header pages, read the consumer name, 
 
     const generatedFiles = [];
 
-    // Generate one .docx dispute letter per furnisher (using structured data)
-    for (const furnisher of (violationsData.furnishers || [])) {
-      const safeName = furnisher.name.replace(/[^a-zA-Z0-9]/g, '_');
-      const filename = `Dispute_Letter_${safeName}.docx`;
-      const filepath = path.join(outputDir, filename);
-      await generateDisputeLetterDocx(
-        { furnisherName: furnisher.name, furnisher, accounts: furnisher.accounts || [], violations: furnisher.violations || [] },
-        violationsData.consumer,
-        filepath
-      );
-      generatedFiles.push({ name: filename, path: filepath, label: `Dispute Letter — ${furnisher.name}` });
-    }
+    // Consumer identity details typed into the wizard (all optional — blanks
+    // render as fill-in lines in the letters).
+    const clientIdentity = {
+      phone: req.body.phone || '',
+      phone2: req.body.phone2 || '',
+      email: req.body.email || '',
+      dob: req.body.dob || '',
+      ssn: req.body.ssn || '',
+      formerNames: req.body.formerNames || '',
+      proofOfAddress: req.body.proofOfAddress || '',
+    };
 
-    // Factual one-round dispute letter (closed-universe audit style)
-    const factualPath = path.join(outputDir, 'Factual_Dispute_Letter.docx');
-    await generateFactualDisputeLetterDocx(violationsData, factualPath);
-    generatedFiles.push({ name: 'Factual_Dispute_Letter.docx', path: factualPath, label: 'Factual One-Round Dispute Letter' });
+    // The one mailed dispute instrument: the plain-English Watts letter.
+    const wattsPath = path.join(outputDir, 'Dispute_Letter.docx');
+    await generateWattsLetterDocx(violationsData, clientIdentity, {}, wattsPath);
+    generatedFiles.push({ name: 'Dispute_Letter.docx', path: wattsPath, label: 'Dispute Letter (mail this)' });
 
-    // Markup Map (red box locations; item numbers match the factual letter)
+    // Internal litigation memo — statutes, case law, damages, chronology.
+    const memoPath = path.join(outputDir, 'Litigation_Memo.docx');
+    const memoJsonPath = path.join(outputDir, 'litigation_memo.json');
+    await generateLitigationMemoDocx(violationsData, {}, memoPath, memoJsonPath);
+    generatedFiles.push({ name: 'Litigation_Memo.docx', path: memoPath, label: 'Litigation Memo (INTERNAL — do not mail)' });
+
+    // Markup Map (red box locations; item numbers match the dispute letter)
     const markupPath = path.join(outputDir, 'Markup_Map.docx');
     await generateMarkupMapDocx(violationsData, markupPath);
     generatedFiles.push({ name: 'Markup_Map.docx', path: markupPath, label: 'Markup Map (Red Box Guide)' });
 
-    // File Disclosure Demand letter
-    const disclosurePath = path.join(outputDir, 'File_Disclosure_Demand.docx');
-    await generateFileDisclosureDocx(violationsData.consumer, disclosurePath);
-    generatedFiles.push({ name: 'File_Disclosure_Demand.docx', path: disclosurePath, label: 'File Disclosure Demand (§1681g)' });
+    // Plain-language §1681g full-file request (separate envelope)
+    const disclosurePath = path.join(outputDir, 'Full_File_Request.docx');
+    await generateFileDisclosureDocx(violationsData.consumer, clientIdentity, disclosurePath);
+    generatedFiles.push({ name: 'Full_File_Request.docx', path: disclosurePath, label: 'Full-File Request (mail separately)' });
 
     // Mailing Instructions docx — pass full structured data
     const mailingPath = path.join(outputDir, 'Mailing_Instructions.docx');
     await generateMailingInstructionsDocx(violationsData, mailingPath);
     generatedFiles.push({ name: 'Mailing_Instructions.docx', path: mailingPath, label: 'Mailing Instructions' });
-
-    // Highlighting Guide docx — pass full structured data
-    const guidePath = path.join(outputDir, 'Highlighting_Guide.docx');
-    await generateHighlightingGuideDocx(violationsData, guidePath);
-    generatedFiles.push({ name: 'Highlighting_Guide.docx', path: guidePath, label: 'Highlighting Guide' });
 
     // HTML Violation Report
     const htmlReport = generateViolationReportHtml(violationsData);
@@ -794,6 +834,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
         name: f.name,
         violationCount: (f.violations || []).length,
         accountCount: (f.accounts || []).length,
+        accounts: (f.accounts || []).map(a => a.accountName).filter(Boolean),
       })),
       files: generatedFiles.map(f => ({ name: f.name, label: f.label, url: `/download/${sessionId}/${f.name}` })),
       zipUrl: `/download/${sessionId}/BMB_Dispute_Package.zip`,

@@ -85,6 +85,20 @@
         <div id="fileItems"></div>
       </div>
 
+      <div style="margin:16px 0">
+        <label style="font-weight:600;font-size:14px;display:block;margin-bottom:6px">Your details (go on the letters — leave blank to fill in by hand)</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <input id="idPhone" type="tel" placeholder="Phone" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idPhone2" type="tel" placeholder="Second phone (optional)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idEmail" type="email" placeholder="Email" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idDob" type="text" placeholder="Date of birth (MM/DD/YYYY)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idSsn" type="text" placeholder="SSN (or last 4)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idFormerNames" type="text" placeholder="Former name(s) (optional)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+          <input id="idProof" type="text" placeholder='Proof of address you will enclose (e.g. "Delmarva Power bill")' style="grid-column:1 / -1;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-top:4px">A full identity block blocks the bureaus' "we don't think this is really you" stall letter. These details stay on this computer.</div>
+      </div>
+
       <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalysis()" disabled>
         Analyze Credit Report →
       </button>
@@ -115,6 +129,14 @@
 
       <!-- Furnisher List -->
       <div id="furnisherList" style="margin:24px 0"></div>
+
+      <!-- Review gate: the letters are only final once the consumer has
+           personally reviewed and approved every disputed account -->
+      <div id="reviewGate" style="margin:24px 0;padding:16px;border:2px solid #f59e0b;border-radius:12px;background:#fffbeb">
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">Review before mailing — required</h3>
+        <p style="font-size:13px;color:#64748b;margin-bottom:12px">These letters go out in <strong>your</strong> name, so you must personally confirm each account. Two rules: only dispute information that is <strong>actually wrong</strong>, and only dispute an account if you'd be <strong>thrilled to see the whole account deleted</strong> — the bureau's options are always fix, delete, or nothing, and you don't control which. If an account fails either test, re-run the analysis without that account's pages, or strike its items from the letter before mailing.</p>
+        <div id="reviewItems"></div>
+      </div>
 
       <!-- Download Area -->
       <div class="download-area">

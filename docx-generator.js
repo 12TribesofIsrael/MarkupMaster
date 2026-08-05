@@ -4,13 +4,12 @@ const {
   WidthType, ShadingType, UnderlineType, Tab, TabStopType, TabStopPosition,
 } = require('docx');
 const fs = require('fs');
+const { getCRA } = require('./cra-addresses');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const FONT = 'Times New Roman';
 const FONT_BODY = 11;   // pt  (docx sz = pt * 2)
 const sz = pt => pt * 2;
-
-const { getCRA } = require('./cra-addresses');
 
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
@@ -82,83 +81,6 @@ function makeHRule() {
   });
 }
 
-function makeViolationBlock(v) {
-  const paras = [];
-
-  // Violation header line
-  paras.push(new Paragraph({
-    spacing: { before: 180, after: 60 },
-    children: [
-      new TextRun({
-        text: `VIOLATION #${v.number} — ${(v.title || '').toUpperCase()}`,
-        bold: true,
-        size: sz(FONT_BODY),
-        font: FONT,
-      }),
-      v.statute ? new TextRun({ text: `  (${v.statute})`, size: sz(FONT_BODY), font: FONT }) : new TextRun({ text: '' }),
-    ],
-  }));
-
-  // Severity badge line
-  const sevColors = { CRITICAL: 'CC0000', HIGH: 'CC6600', MEDIUM: 'CC9900' };
-  paras.push(new Paragraph({
-    spacing: { before: 0, after: 60 },
-    indent: { left: 360 },
-    children: [
-      new TextRun({
-        text: `[${v.severity || 'HIGH'}]`,
-        bold: true,
-        color: sevColors[v.severity] || 'CC6600',
-        size: sz(10),
-        font: FONT,
-      }),
-    ],
-  }));
-
-  // Sub-fields (BMB order: WHAT IS WRONG → REPORT SHOWS → SHOULD SHOW → IMPACT → PRECEDENT → DEMAND)
-  const fields = [
-    { label: 'WHAT IS WRONG:', value: v.description },
-    ...(v.reportShows ? [{ label: 'REPORT SHOWS:', value: v.reportShows }] : []),
-    ...(v.shouldShow ? [{ label: 'SHOULD SHOW:', value: v.shouldShow }] : []),
-    { label: 'IMPACT:', value: v.impact || null },
-    ...(v.precedent ? [{ label: 'PRECEDENT:', value: v.precedent }] : []),
-    { label: 'DEMAND:', value: v.demand },
-  ];
-
-  for (const f of fields) {
-    if (!f.value) continue;
-    paras.push(new Paragraph({
-      spacing: { before: 40, after: 40 },
-      indent: { left: 360 },
-      children: [
-        new TextRun({ text: `${f.label}  `, bold: true, size: sz(FONT_BODY), font: FONT }),
-        new TextRun({ text: f.value, size: sz(FONT_BODY), font: FONT }),
-      ],
-    }));
-  }
-
-  return paras;
-}
-
-function makeSignatureBlock(consumerName, consumerAddress, today) {
-  return [
-    blank(120),
-    makeBody('I certify under penalty of law that the information provided in this dispute is true and accurate to the best of my knowledge.', { italic: true }),
-    blank(80),
-    makeBody('Respectfully submitted,'),
-    blank(200),
-    makeBody('_________________________________'),
-    makeBody(consumerName, { bold: true }),
-    makeBody(consumerAddress),
-    makeBody(`Date: ________________`),
-    blank(120),
-    makeBanner('CERTIFIED MAIL TRACKING'),
-    makeBody('Certified Mail #: ________________________________', { indent: true }),
-    makeBody('Date Mailed: ________________________________', { indent: true }),
-    makeBody('Return Receipt Received: ________________________________', { indent: true }),
-  ];
-}
-
 function makeSimpleTable(headers, rows) {
   const headerCells = headers.map(h => new TableCell({
     shading: { type: ShadingType.SOLID, color: '222222', fill: '222222' },
@@ -195,263 +117,370 @@ function makeDoc(children) {
   });
 }
 
-// ─── DISPUTE LETTER ───────────────────────────────────────────────────────────
+// Placeholder for identity fields the consumer hasn't typed in yet — the
+// blank renders in the letter so the user fills it in by hand before mailing.
+const idVal = (v, width = 24) => (v && String(v).trim()) || '_'.repeat(width);
 
-async function generateDisputeLetterDocx(letterData, consumer, outputPath) {
-  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const furnisherName = letterData.furnisherName || 'CREDITOR';
-  const furnisher = letterData.furnisher || {};
-  const accounts = letterData.accounts || [];
-  const violations = letterData.violations || [];
+// Unique, non-null report pages a violation's red boxes land on.
+function markupPages(v) {
+  const pages = [...new Set((v.markup || []).map(m => m.page).filter(p => p != null))];
+  return pages;
+}
+
+// Fallback wording when the model omitted disputeWording (older runs).
+function wordingOf(v) {
+  if (v.disputeWording) {
+    // Older runs baked a blanket remedy tail into the wording; the remedy is
+    // now its own per-item sentence, so strip the legacy tail.
+    return String(v.disputeWording).replace(/\s*Please fix or delete this entire account\.?\s*$/i, '').trim();
+  }
+  return v.reportShows && v.reportShows !== 'FIELD NOT PRESENT'
+    ? `The report shows "${v.reportShows}" for ${v.title ? v.title.toLowerCase() : 'this field'}, which is inaccurate or inconsistent.`
+    : `${v.title ? v.title.charAt(0) + v.title.slice(1).toLowerCase() : 'A required field'} is missing or blank on this account.`;
+}
+
+function remedyOf(v) {
+  if (v.remedyWording) return v.remedyWording;
+  return 'Please correct this, or delete this account if you cannot verify it as complete and accurate.';
+}
+
+// ─── WATTS DISPUTE LETTER (the only mailed dispute instrument) ────────────────
+//
+// Doctrine (John G. Watts): plain English, no statute citations, cooperative
+// tone, per-item specificity, exact remedy per item, ID + address proof
+// enclosed, circled report pages enclosed, full copy cc'd to every furnisher,
+// written-explanation demand as the willfulness record.
+
+async function generateWattsLetterDocx(violationsData, clientIdentity = {}, options = {}, outputPath) {
+  const consumer = (violationsData && violationsData.consumer) || {};
+  const furnishers = (violationsData && violationsData.furnishers) || [];
   const cra = getCRA(consumer.bureau);
+  const round = options.round || 1;
+  const prior = options.prior || {};
 
-  // Count accounts
-  const acctCount = accounts.length;
-  const acctWord = acctCount === 1 ? 'ONE (1) ACCOUNT' : `${numberWord(acctCount)} (${acctCount}) ACCOUNTS`;
+  const dateLine = options.mailDate
+    || '[DATE MAILED — fill in the day you actually mail this letter]';
+  const phone = idVal(clientIdentity.phone, 18);
+  const email = idVal(clientIdentity.email, 24);
+  const proofName = (clientIdentity.proofOfAddress && String(clientIdentity.proofOfAddress).trim())
+    || 'a recent utility bill or bank statement';
 
   const children = [
-    // Banner
     makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
     blank(),
-
-    // Date
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: today, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: dateLine, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     blank(),
-
-    // CRA address
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     makeBody(cra.dept),
     makeBody(cra.addr),
     makeBody(cra.city),
-    makeBody(cra.phone),
     blank(),
 
-    // RE line
-    new Paragraph({
-      spacing: { before: 80, after: 80 },
-      children: [new TextRun({ text: `RE:  FORMAL DISPUTE UNDER FCRA §1681i — ${furnisherName.toUpperCase()} — ${acctWord}`, bold: true, size: sz(FONT_BODY), font: FONT })],
-    }),
-    blank(),
-
-    // CC block (CRITICAL — never omit per BMB protocol)
-    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: `CC:  ${furnisherName.toUpperCase()}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    ...(furnisher.address ? [makeBody(furnisher.address)] : []),
-    ...(furnisher.phone ? [makeBody(furnisher.phone)] : []),
-    makeBody('Certified Mail Tracking #: ________________________________'),
-    blank(),
-
-    // Consumer info
-    makeLabelValue('Consumer:', consumer.name || '[Consumer Name]'),
+    // Full identity block — anticipates and defeats the "we don't think this
+    // is really you" stall letter.
+    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
     makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
-    makeLabelValue('DOB:', 'Redacted for security'),
-    makeLabelValue('SSN (Last 4):', 'Redacted for security'),
-    makeLabelValue('Report Date:', consumer.reportDate || today),
+    makeLabelValue('Phone:', phone + (clientIdentity.phone2 ? `  /  ${clientIdentity.phone2}` : '')),
+    makeLabelValue('Email:', email),
+    makeLabelValue('Date of birth:', idVal(clientIdentity.dob, 14)),
+    makeLabelValue('SSN:', idVal(clientIdentity.ssn, 14)),
+    ...(clientIdentity.formerNames ? [makeLabelValue('Former name(s):', clientIdentity.formerNames)] : []),
+    blank(),
 
-    makeHRule(),
-
-    // Section I: Statutory Authority
-    makeSectionHeading('I', 'STATUTORY AUTHORITY & CONSUMER RIGHTS'),
-    makeBody('This formal dispute is submitted pursuant to the Fair Credit Reporting Act (FCRA), 15 U.S.C. §1681 et seq. The following statutes and standards govern this dispute:'),
-    makeBody('• 15 U.S.C. §1681i(a) — Reinvestigation of disputed information; 30-day deadline', { indent: true }),
-    makeBody('• 15 U.S.C. §1681e(b) — Maximum possible accuracy requirement', { indent: true }),
-    makeBody('• 15 U.S.C. §1681g(a) — Full file disclosure and method of verification', { indent: true }),
-    makeBody('• 15 U.S.C. §1681s-2(b) — Furnisher duties upon notice of dispute', { indent: true }),
-    makeBody('• 15 U.S.C. §1681c(a)(4) — Seven-year reporting period limitation', { indent: true }),
-    makeBody('• CDIA Metro 2® Credit Reporting Resource Guide (2023) — Technical field standards', { indent: true }),
-    makeBody('Pursuant to Cushman v. TransUnion Corp., the CRA may not rely solely on the furnisher\'s verification — it must conduct a reasonable independent investigation. Boilerplate e-OSCAR responses are insufficient per Bradshaw v. BAC Home Loans Servicing, LP.'),
-
-    // Section II: Disputed Accounts & Violations
-    makeSectionHeading('II', 'DISPUTED ACCOUNTS & VIOLATIONS'),
+    makeBody(`RE: Dispute of inaccurate information on my ${consumer.bureau || ''} credit report (report dated ${consumer.reportDate || '[report date]'})`, { bold: true }),
   ];
 
-  // Group violations by account
-  const byAccount = {};
-  for (const v of violations) {
-    const key = v.accountName || v.account || furnisherName;
-    if (!byAccount[key]) byAccount[key] = [];
-    byAccount[key].push(v);
+  if (round >= 2) {
+    children.push(makeBody(round >= 3 ? 'THIRD AND FINAL NOTICE' : 'SECOND NOTICE — FINAL NOTICE BEFORE I TAKE FURTHER ACTION', { bold: true }));
   }
 
-  // If no account grouping, use accounts array
-  if (Object.keys(byAccount).length === 0 && accounts.length > 0) {
-    for (const acct of accounts) {
-      byAccount[acct.accountName || acct.accountNumber] = [];
-    }
+  children.push(makeHRule());
+  children.push(makeBody('To whom it may concern:'));
+
+  if (round >= 2) {
+    const sent = prior.mailDate ? ` on ${prior.mailDate}` : '';
+    const trk = prior.tracking ? ` (certified mail tracking number ${prior.tracking})` : '';
+    const dlv = prior.deliveredDate ? `, and it was delivered on ${prior.deliveredDate}` : '';
+    children.push(makeBody(`This is not my first letter about these errors. I mailed you a dispute about these exact same items${sent} by certified mail${trk}${dlv}. You responded that you verified the items listed below, but you did not fix them. The errors are still on my report, and they are still wrong for the same reasons I explained before. I am asking you again to actually look at what your own report says and correct it.`));
   }
 
-  // Output per-account
-  for (const [acctName, acctViolations] of Object.entries(byAccount)) {
-    const acct = accounts.find(a => a.accountName === acctName || a.accountNumber === acctName) || {};
-    children.push(makeSubHeading(`${acctName.toUpperCase()} — Account #${acct.accountNumber || 'NOT VISIBLE ON REPORT'}`));
-    // Build account detail lines from all available fields
-    const acctDetails = [];
-    if (acct.accountType) acctDetails.push(`Account Type: ${acct.accountType}`);
-    if (acct.status) acctDetails.push(`Status: ${acct.status}${acct.statusCode ? ` (Code ${acct.statusCode})` : ''}`);
-    if (acct.balance) acctDetails.push(`Balance: ${acct.balance}`);
-    if (acct.pastDue) acctDetails.push(`Past Due: ${acct.pastDue}`);
-    if (acct.creditLimit) acctDetails.push(`Credit Limit: ${acct.creditLimit}`);
-    if (acct.highCredit) acctDetails.push(`High Credit: ${acct.highCredit}`);
-    if (acct.originalChargeOffAmount) acctDetails.push(`Original Charge-Off Amount: ${acct.originalChargeOffAmount}`);
-    if (acct.dateOpened) acctDetails.push(`Date Opened: ${acct.dateOpened}`);
-    if (acct.dateClosed) acctDetails.push(`Date Closed: ${acct.dateClosed}`);
-    if (acct.dofd) acctDetails.push(`DOFD: ${acct.dofd}`);
-    if (acct.dateLastPayment) acctDetails.push(`Last Payment: ${acct.dateLastPayment}`);
-    if (acct.paymentHistory) acctDetails.push(`Payment History: ${acct.paymentHistory}`);
-    if (acct.ecoaCode) acctDetails.push(`ECOA: ${acct.ecoaCode}`);
-    if (acct.responsibilityType) acctDetails.push(`Responsibility: ${acct.responsibilityType}`);
-    if (acctDetails.length > 0) {
-      // Split into 2 lines for readability
-      const mid = Math.ceil(acctDetails.length / 2);
-      children.push(makeBody(acctDetails.slice(0, mid).join('   |   ')));
-      if (acctDetails.length > mid) {
-        children.push(makeBody(acctDetails.slice(mid).join('   |   ')));
-      }
-    }
-    for (const v of acctViolations) {
-      children.push(...makeViolationBlock(v));
-    }
-    // Per-account summary line
-    if (acctViolations.length > 0) {
-      const critCount = acctViolations.filter(v => v.severity === 'CRITICAL').length;
-      children.push(makeBody(`This account contains ${acctViolations.length} distinct FCRA/Metro 2® violation(s)${critCount > 0 ? ` (${critCount} CRITICAL)` : ''}. DEMAND: Investigate, correct, or delete this tradeline in its entirety.`, { bold: true }));
-    }
-  }
+  children.push(makeBody(`I have personally reviewed my ${consumer.bureau || ''} credit report and it contains errors. So you can be sure this letter really is from me, I have enclosed a copy of my government-issued photo ID and ${proofName} showing my name and current address. I have also enclosed the pages of my credit report with each error circled in red.`));
+  children.push(makeBody('Here are the errors, listed account by account. For each one I explain what is wrong, why it is wrong, and exactly what I am asking you to do.'));
+  children.push(blank(80));
 
-  // If violations weren't account-grouped, just output all
-  if (Object.keys(byAccount).length === 0) {
+  let itemNo = 0;
+  for (const f of furnishers) {
+    const violations = f.violations || [];
+    if (violations.length === 0) continue;
+    const acctNums = (f.accounts || []).map(a => a.accountNumber).filter(Boolean).join(', ');
+    children.push(makeSubHeading(`${f.name.toUpperCase()}${acctNums ? ` — Account ${acctNums}` : ''}`));
     for (const v of violations) {
-      children.push(...makeViolationBlock(v));
+      itemNo++;
+      const pages = markupPages(v);
+      const proofSentence = pages.length > 0
+        ? ` See the circled item on enclosed report page ${pages.join(' and page ')}.`
+        : '';
+      children.push(new Paragraph({
+        spacing: { before: 80, after: 80 },
+        indent: { left: 360 },
+        children: [
+          new TextRun({ text: `${itemNo}.  `, bold: true, size: sz(FONT_BODY), font: FONT }),
+          new TextRun({ text: `${wordingOf(v)}${proofSentence} `, size: sz(FONT_BODY), font: FONT }),
+          new TextRun({ text: remedyOf(v), bold: true, size: sz(FONT_BODY), font: FONT }),
+        ],
+      }));
     }
   }
 
-  // Section III: Legal Precedent & Case Law
-  children.push(makeSectionHeading('III', 'LEGAL PRECEDENT & CASE LAW'));
-  children.push(makeBody('The following federal case law supports the violations and demands identified in this dispute:'));
-  children.push(makeBody(`• Gillespie v. Equifax Info. Servs. LLC — Truncated or masked account numbers violate §1681g(a)(1) because the consumer cannot independently verify the tradeline belongs to them.`, { indent: true }));
-  children.push(makeBody(`• Seamans v. Temple University — Payment history that jumps from current to severe delinquency without the required intermediate steps (30→60→90→120→150→180) constitutes inaccurate reporting under §1681e(b).`, { indent: true }));
-  children.push(makeBody(`• Cushman v. TransUnion Corp. — The CRA may not rely solely on the furnisher's e-OSCAR verification; it must conduct a reasonable, independent investigation per §1681i.`, { indent: true }));
-  children.push(makeBody(`• Bradshaw v. BAC Home Loans Servicing, LP — Boilerplate, automated e-OSCAR responses from furnishers do not constitute a "reasonable investigation" under §1681s-2(b).`, { indent: true }));
+  children.push(blank(80));
+  // Willfulness scaffold — written for the future judge, in consumer words.
+  children.push(makeBody('If, after your investigation, you decide to keep any of the items above on my report, please send me a written explanation of what you reviewed for that item and copies of the documents you relied on. If an item cannot be verified as complete and accurate, please delete it.'));
+  children.push(makeBody('Please send me the results of your investigation and an updated copy of my credit report showing the corrections, and notify anyone who received my report of the corrections, as applicable.'));
+  children.push(makeBody(`I expect you to take this letter seriously, and I am confident you will fix these errors. If anything about my request is unclear, please write to me at my address above, call me at ${phone}, or email me at ${email} — I am happy to answer questions or send anything else you need.`));
+  children.push(blank(120));
+  children.push(makeBody('Sincerely,'));
+  children.push(blank(200));
+  children.push(makeBody('_________________________________'));
+  children.push(makeBody(consumer.name || '[Consumer Name]', { bold: true }));
+  children.push(makeBody(consumer.address || '[Consumer Address]'));
+  children.push(blank(120));
 
-  // Section IV: Statutory Demands
-  children.push(makeSectionHeading('IV', 'STATUTORY DEMANDS'));
-  children.push(makeBody(`Pursuant to FCRA §1681i(a), I hereby formally demand that ${cra.name} perform the following within thirty (30) days of receipt of this letter:`));
+  // Enclosures — listed so the record shows exactly what was sent.
+  children.push(makeBody('Enclosures:', { bold: true }));
+  children.push(makeBody('1.  Copy of my government-issued photo ID', { indent: true }));
+  children.push(makeBody(`2.  Copy of ${proofName} showing my name and current address`, { indent: true }));
+  children.push(makeBody('3.  Pages of my credit report with each error circled in red', { indent: true }));
+  children.push(blank(80));
 
-  const demands = [
-    `Conduct a full and reasonable reinvestigation of each and every disputed item identified above, contacting ${furnisherName} and forwarding all relevant dispute information per §1681i(a)(2)(A).`,
-    `Provide complete verification and documentation of each disputed item, or permanently delete the item from my consumer file per §1681i(a)(5)(A).`,
-    `Suppress each disputed account from all consumer reports issued during the pendency of the investigation per §1681i(a)(5)(A).`,
-    'Provide full file disclosure pursuant to §1681g(a), including the method of verification used for each item and the identity of each person contacted.',
-    `Forward a complete description of the results of this reinvestigation to ${furnisherName} per §1681i(a)(6)(B)(iii).`,
-    'Forward corrected reports to all persons who received a consumer report containing the disputed information within the prior two (2) years per §1681i(a)(6)(B)(i).',
-    'Provide me with a corrected copy of my consumer disclosure upon completion of the reinvestigation per §1681i(a)(6)(A).',
-    'Delete any and all information that cannot be fully verified, documented, and confirmed accurate within the 30-day deadline per §1681i(a)(5)(A).',
-  ];
+  // Every furnisher receives a COMPLETE copy of this letter with all
+  // enclosures — the furnisher is judged by the notice it had.
+  const withViolations = furnishers.filter(f => (f.violations || []).length > 0);
+  if (withViolations.length > 0) {
+    children.push(makeBody('cc (each sent a complete copy of this letter with all enclosures, by certified mail):', { bold: true }));
+    withViolations.forEach((f, i) => {
+      children.push(makeBody(`${i + 1}.  ${f.name}${f.address ? `, ${f.address}` : ' — [address as shown on my credit report]'}`, { indent: true }));
+    });
+    children.push(blank(80));
+  }
 
-  const demandLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-  demands.forEach((d, i) => {
-    children.push(new Paragraph({
-      spacing: { before: 60, after: 60 },
-      indent: { left: 360 },
-      children: [
-        new TextRun({ text: `${demandLetters[i]}.  `, bold: true, size: sz(FONT_BODY), font: FONT }),
-        new TextRun({ text: d, size: sz(FONT_BODY), font: FONT }),
-      ],
-    }));
-  });
-
-  // Section V: Timeline & Consequences
-  children.push(makeSectionHeading('V', 'COMPLIANCE TIMELINE & LEGAL CONSEQUENCES'));
-  children.push(makeBody(`This dispute must be fully investigated and resolved within thirty (30) days of receipt, pursuant to FCRA §1681i(a)(1). The investigation period may be extended to forty-five (45) days only if the consumer submits additional relevant information during the investigation.`));
-  children.push(makeBody('Failure to comply with these requirements may subject your organization to civil liability under:'));
-  children.push(makeBody('• §1681n — Willful noncompliance: Statutory damages of $100–$1,000 per violation, plus punitive damages and attorney\'s fees.', { indent: true }));
-  children.push(makeBody('• §1681o — Negligent noncompliance: Actual damages plus attorney\'s fees and court costs.', { indent: true }));
-  children.push(makeBody('This letter may be submitted as evidence in any subsequent civil litigation.'));
-
-  // Section VI: Enclosed Documentation
-  children.push(makeSectionHeading('VI', 'ENCLOSED DOCUMENTATION'));
-  children.push(makeBody('The following documents are enclosed with this dispute letter:'));
-  children.push(makeBody('☐  Government-issued photo identification (front and back)', { indent: true }));
-  children.push(makeBody('☐  Proof of current address (utility bill, bank statement, or lease within 60 days)', { indent: true }));
-  children.push(makeBody('☐  Highlighted copy of credit report with violations marked', { indent: true }));
-  children.push(makeBody('☐  Copy of this dispute letter for your records', { indent: true }));
-
-  // Section VII: Certificate of Service
-  children.push(makeSectionHeading('VII', 'CERTIFICATE OF SERVICE'));
-  children.push(makeBody(`I hereby certify that on this date, a true and correct copy of this dispute letter, together with all enclosures, has been sent via United States Certified Mail, Return Receipt Requested, to:`));
-  children.push(makeBody(`1.  ${cra.name}, ${cra.dept}, ${cra.addr}, ${cra.city}`, { indent: true, bold: true }));
-  children.push(makeBody(`2.  ${furnisherName}${furnisher.address ? ', ' + furnisher.address : ''}`, { indent: true, bold: true }));
-
-  // Signature block
-  children.push(...makeSignatureBlock(consumer.name || '[Consumer Name]', consumer.address || '[Consumer Address]', today));
+  // Consumer-side record keeping (filled in by hand at the post office).
+  children.push(makeBody('For my records — certified mail tracking:', { bold: true }));
+  children.push(makeBody('Tracking # (this letter): ________________________________', { indent: true }));
+  children.push(makeBody('Date mailed: ____________________   Return receipt received: ____________________', { indent: true }));
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);
   fs.writeFileSync(outputPath, buffer);
 }
 
-// ─── FILE DISCLOSURE LETTER ───────────────────────────────────────────────────
+// ─── LITIGATION MEMO (internal — never mailed) ───────────────────────────────
+//
+// Holds everything that was deliberately stripped out of the mailed letter:
+// statute mapping, case law, damages math, SOL tracking, and the event
+// chronology. Its JSON sidecar is structured to populate the federal
+// complaint template (docs/BMB_Federal_Complaint_Template_NEW.md) counts:
+//   COUNT I  — 15 U.S.C. §1681i   (CRA reinvestigation)
+//   COUNT II — 15 U.S.C. §1681e(b) (maximum possible accuracy)
+//   COUNT III— 15 U.S.C. §1681s-2(b) (furnisher investigation)
+// plus §1681g (separate file-request letter) and FDCPA §1692e(8) for
+// collector furnishers.
 
-async function generateFileDisclosureDocx(consumer, outputPath) {
-  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+const CASE_BANK = [
+  { cite: 'Kelly v. RealPage Inc., 47 F.4th 202 (3d Cir. 2022)', binding: '3d Cir. — BINDING in Delaware', holding: 'A plain-language request for the consumer\'s "full file" is legally sufficient under §1681g; supplies the §1681g violation theory and the standing analysis.' },
+  { cite: 'Seamans v. Temple Univ., 744 F.3d 853 (3d Cir. 2014)', binding: '3d Cir. — BINDING in Delaware', holding: 'Reporting that is technically accurate but materially incomplete or misleading is actionable; supports incomplete-field and payment-history-gap items.' },
+  { cite: 'Cushman v. Trans Union Corp., 115 F.3d 220 (3d Cir. 1997)', binding: '3d Cir. — BINDING in Delaware', holding: 'A CRA may not simply parrot the furnisher\'s verification; §1681i requires an independent, reasonable reinvestigation.' },
+  { cite: 'Gillespie v. Equifax Info. Servs. LLC, 484 F.3d 938 (7th Cir. 2007)', binding: '7th Cir. — persuasive', holding: 'File disclosure must be complete enough for the consumer to identify and verify accounts; supports truncated-account-number items.' },
+  { cite: 'Chiang v. Verizon New England Inc., 595 F.3d 26 (1st Cir. 2010)', binding: '1st Cir. — persuasive', holding: 'The specificity of the consumer\'s dispute defines the scope of the investigation owed — the reason the mailed letter itemizes every error at field level.' },
+  { cite: 'Bradshaw v. BAC Home Loans Servicing, LP, 816 F. Supp. 2d 1066 (D. Or. 2011)', binding: 'D. Or. — persuasive', holding: 'Boilerplate e-OSCAR verification is not a reasonable investigation under §1681s-2(b).' },
+  { cite: 'Morris v. Carrington Mortgage Servs. (see Watts corpus)', binding: 'persuasive', holding: 'The furnisher is judged largely by the notice the CRA gives it — the reason every furnisher is cc\'d a complete copy of the dispute letter.' },
+];
+
+function statuteTags(v, furnisher) {
+  const s = String(v.statute || '');
+  const tags = new Set();
+  if (/1681e\(b\)/i.test(s)) tags.add('§1681e(b)');
+  if (/1681i/i.test(s)) tags.add('§1681i');
+  if (/1681g/i.test(s)) tags.add('§1681g');
+  if (/1681c/i.test(s)) tags.add('§1681c(a)');
+  if (/1681s-2/i.test(s)) tags.add('§1681s-2(b)');
+  if (tags.size === 0) tags.add('§1681e(b)'); // inaccuracy/incompleteness default
+  if (furnisher && furnisher.isCollector === true) tags.add('FDCPA §1692e(8)');
+  return [...tags];
+}
+
+async function generateLitigationMemoDocx(violationsData, memoContext = {}, outputPath, jsonPath) {
+  const consumer = (violationsData && violationsData.consumer) || {};
+  const furnishers = (violationsData && violationsData.furnishers) || [];
+  const events = memoContext.events || [];
+  const solDeadline = memoContext.solDeadline || null;
+
+  const children = [
+    makeBanner('INTERNAL LITIGATION MEMO — DO NOT MAIL'),
+    makeBody('This memo is the litigation-side record of the dispute. The mailed letter deliberately contains no statutes or case law (a plain factual dispute raises the investigation owed and cannot be brushed off as credit-repair boilerplate); this memo maps every mailed item to its statutory hooks for the lawsuit that follows if the errors are verified without correction.', { italic: true }),
+    makeHRule(),
+
+    makeSectionHeading('I', 'PARTIES & REPORT'),
+    makeLabelValue('Consumer:', consumer.name || '[Consumer Name]'),
+    makeLabelValue('CRA:', `${consumer.bureau || '[Bureau]'} (prospective defendant under §§1681i, 1681e(b), 1681g)`),
+    makeLabelValue('Report date:', consumer.reportDate || '[report date]'),
+  ];
+
+  furnishers.forEach(f => {
+    if ((f.violations || []).length === 0) return;
+    children.push(makeBody(`Furnisher: ${f.name}${f.isCollector === true ? '  — COLLECTOR/DEBT BUYER (adds FDCPA §1692e(8) exposure)' : ''} (prospective defendant under §1681s-2(b))`, { indent: true }));
+  });
+
+  children.push(makeSectionHeading('II', 'VIOLATION-TO-STATUTE MAP'));
+  children.push(makeBody('Item numbers match the mailed dispute letter and the Markup Map. Every item, once disputed to the CRA and verified without correction, supports the §1681i claim against the CRA and the §1681s-2(b) claim against the furnisher; the statute column lists the additional specific hooks.'));
+
+  const rows = [];
+  let itemNo = 0;
+  for (const f of furnishers) {
+    for (const v of (f.violations || [])) {
+      itemNo++;
+      rows.push([
+        String(itemNo),
+        v.accountName || f.name,
+        v.title || '',
+        v.severity || '',
+        statuteTags(v, f).join('; '),
+        `${v.remedyType || 'correct'} — ${v.remedyWording || v.demand || ''}`,
+      ]);
+    }
+  }
+  children.push(makeSimpleTable(['#', 'Account', 'Violation', 'Severity', 'Statutory hooks', 'Remedy sought'], rows));
+  children.push(blank());
+
+  children.push(makeSectionHeading('III', 'CLAIM THEORIES'));
+  children.push(makeBody('§1681i (reinvestigation): reaches any item in the consumer FILE; requires an actual inaccuracy (accurate reporting is a complete defense) but no third-party publication. This dispute letter is the claim-creating act; the 30-day clock runs from CRA receipt.', { indent: true }));
+  children.push(makeBody('§1681e(b) (maximum possible accuracy): REQUIRES publication — a third party must have received a report containing the error. Track credit pulls/denials after the failed reinvestigation; a turndown after the botched investigation is the damages core.', { indent: true }));
+  children.push(makeBody('§1681s-2(b) (furnisher duties): triggered ONLY by the CRA forwarding the dispute — never by direct letters to the furnisher. The cc copy does not trigger duties by itself, but once the CRA notice arrives the furnisher must consider the full letter it was sent. Plead in the alternative: the CRA forwarded the dispute, or alternatively failed to (deepening the CRA\'s own liability).', { indent: true }));
+  children.push(makeBody('§1681g (file disclosure): a separate claim built by the separate plain-language full-file request letter (Kelly v. RealPage). If the CRA answers with the standard consumer report instead of the full file, that failure is its own count.', { indent: true }));
+  const collectors = furnishers.filter(f => f.isCollector === true && (f.violations || []).length > 0);
+  if (collectors.length > 0) {
+    children.push(makeBody(`FDCPA §1692e(8) (collectors: ${collectors.map(f => f.name).join(', ')}): a debt collector who reports after this dispute without flagging the debt as disputed makes a false representation. Proof pattern: dispute date (certified receipt) + post-dispute report update lacking the disputed flag.`, { indent: true }));
+  }
+
+  children.push(makeSectionHeading('IV', 'CASE-LAW BANK (Delaware / 3d Circuit first)'));
+  for (const c of CASE_BANK) {
+    children.push(makeBody(`${c.cite} [${c.binding}] — ${c.holding}`, { indent: true }));
+  }
+  children.push(makeBody('VERIFY every citation against the primary source before it goes into any filing.', { bold: true }));
+
+  children.push(makeSectionHeading('V', 'DAMAGES INPUTS'));
+  const total = itemNo;
+  children.push(makeBody(`Violations documented: ${total}. Willful noncompliance (§1681n): statutory damages $100–$1,000 per violation → $${(total * 100).toLocaleString()}–$${(total * 1000).toLocaleString()}, plus punitive damages and fees. Negligent (§1681o): actual damages plus fees.`));
+  children.push(makeBody('Actual damages to document: credit denials AFTER the failed reinvestigation, higher rates/deposits, and emotional distress the consumer can articulate concretely. Build the timeline; never apply for credit purely to manufacture a denial.', { indent: true }));
+
+  children.push(makeSectionHeading('VI', 'STATUTE OF LIMITATIONS'));
+  children.push(makeBody(solDeadline
+    ? `FCRA SOL deadline on file: ${solDeadline} (2 years from the results of investigation; outer limit 5 years from violation — §1681p).`
+    : 'FCRA §1681p: earlier of 2 years after discovery or 5 years after the violation. Practical trigger: the date the results of investigation arrive — recorded automatically once campaign tracking logs it.'));
+
+  children.push(makeSectionHeading('VII', 'EVENT CHRONOLOGY (the willfulness record)'));
+  if (events.length > 0) {
+    children.push(makeSimpleTable(
+      ['Date', 'Event', 'Details'],
+      events.map(e => [e.event_date || '', e.type || '', typeof e.details === 'string' ? e.details : JSON.stringify(e.details || '')])
+    ));
+  } else {
+    children.push(makeBody('No events recorded yet. Once the campaign tracker logs the mailing date, tracking number, delivery, results, calls, and later rounds, this table becomes the chronology that gets pleaded — certified-letter dates bracketing the CRA\'s own responses are what proves willfulness.', { italic: true }));
+  }
+
+  const doc = makeDoc(children);
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+
+  if (jsonPath) {
+    // Machine-readable sidecar, keyed for the federal complaint template.
+    const perViolationStatutes = [];
+    let n = 0;
+    const counts = { '1681i': [], '1681e(b)': [], '1681g': [], '1681s-2(b)': [], '1681c(a)': [], 'FDCPA 1692e(8)': [] };
+    for (const f of furnishers) {
+      for (const v of (f.violations || [])) {
+        n++;
+        const tags = statuteTags(v, f);
+        perViolationStatutes.push({
+          item: n, furnisher: f.name, account: v.accountName || null, title: v.title || null,
+          severity: v.severity || null, statutes: tags, remedyType: v.remedyType || null,
+          remedyWording: v.remedyWording || null, precedent: v.precedent || null,
+        });
+        for (const t of tags) {
+          const key = t.replace('§', '');
+          if (counts[key]) counts[key].push(n);
+        }
+        // Every disputed item feeds Counts I and III once verified unchanged.
+        if (!counts['1681i'].includes(n)) counts['1681i'].push(n);
+        if (!counts['1681s-2(b)'].includes(n)) counts['1681s-2(b)'].push(n);
+      }
+    }
+    const sidecar = {
+      parties: {
+        consumer: { name: consumer.name || null, address: consumer.address || null },
+        cra: consumer.bureau || null,
+        furnishers: furnishers.filter(f => (f.violations || []).length > 0)
+          .map(f => ({ name: f.name, address: f.address || null, isCollector: f.isCollector === true })),
+      },
+      reportDate: consumer.reportDate || null,
+      counts,
+      perViolationStatutes,
+      damages: { violationCount: n, willfulRange: [n * 100, n * 1000] },
+      solDeadline: solDeadline,
+      chronology: events,
+    };
+    fs.writeFileSync(jsonPath, JSON.stringify(sidecar, null, 2), 'utf8');
+  }
+}
+
+// ─── §1681g FULL-FILE REQUEST (plain language, separate envelope) ─────────────
+//
+// Kelly v. RealPage, 47 F.4th 202 (3d Cir. 2022): a plain-language request
+// for the full file is legally sufficient. No invented deadlines, no threats
+// — if the CRA answers with the standard report instead of the file, that
+// failure itself becomes the §1681g count.
+
+async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputPath) {
   const cra = getCRA(consumer.bureau);
+  const phone = idVal(clientIdentity.phone, 18);
+  const proofName = (clientIdentity.proofOfAddress && String(clientIdentity.proofOfAddress).trim())
+    || 'a recent utility bill or bank statement';
 
   const children = [
     makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
     blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: today, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
     blank(),
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     makeBody(cra.dept),
     makeBody(cra.addr),
     makeBody(cra.city),
-    makeBody(cra.phone),
     blank(),
-    new Paragraph({
-      spacing: { before: 80, after: 80 },
-      children: [new TextRun({ text: 'RE:  DEMAND FOR COMPLETE FILE DISCLOSURE PURSUANT TO FCRA §1681g(a)', bold: true, size: sz(FONT_BODY), font: FONT })],
-    }),
-    blank(),
-    makeLabelValue('Consumer:', consumer.name || '[Consumer Name]'),
+    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
     makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
-    makeLabelValue('DOB:', 'Redacted for security'),
-    makeLabelValue('SSN (Last 4):', 'Redacted for security'),
-    makeLabelValue('Report Date:', consumer.reportDate || today),
+    makeLabelValue('Phone:', phone),
+    makeLabelValue('Email:', idVal(clientIdentity.email, 24)),
+    makeLabelValue('Date of birth:', idVal(clientIdentity.dob, 14)),
+    makeLabelValue('SSN:', idVal(clientIdentity.ssn, 14)),
+    blank(),
+    makeBody('RE: Request for my complete consumer file (full file disclosure)', { bold: true }),
     makeHRule(),
-
-    makeSectionHeading('I', 'LEGAL BASIS FOR THIS DEMAND'),
-    makeBody('Pursuant to the Fair Credit Reporting Act (FCRA), 15 U.S.C. §1681g(a), I hereby demand my complete consumer file disclosure. This statute affords every consumer the right to know the contents of their consumer file, the sources of that information, and the identity of every person or entity that has received a consumer report.'),
-    makeBody('This demand is made pursuant to the following statutory provisions:'),
-    makeBody('• §1681g(a)(1) — All information in my consumer file at the time of the request', { indent: true }),
-    makeBody('• §1681g(a)(2) — Sources of the information in my file', { indent: true }),
-    makeBody('• §1681g(a)(3) — Identification of each person that procured a consumer report within 12 months (employment: 24 months)', { indent: true }),
-    makeBody('• §1681g(a)(4) — Dates, original payees, and amounts of any checks forming the basis of adverse characterization', { indent: true }),
-    makeBody('• §1681g(a)(5) — Any record of inquiries received in connection with my credit', { indent: true }),
-
-    makeSectionHeading('II', 'SPECIFIC INFORMATION DEMANDED'),
-    makeBody('I hereby demand complete disclosure of the following:'),
-    makeBody('A.  COMPLETE FILE CONTENTS — Every piece of information in my consumer file, including all tradelines, public records, inquiries, and collection accounts, with full account numbers (not truncated), as required by §1681g(a)(1) and Gillespie v. Equifax Info. Servs. LLC.', { indent: true }),
-    makeBody('B.  SOURCES OF INFORMATION — The name, address, and telephone number of every data furnisher that has reported information currently in my file, per §1681g(a)(2).', { indent: true }),
-    makeBody('C.  REPORT RECIPIENTS — Every person or entity that received a consumer report based on my file within the past 12 months (or 24 months for employment purposes), per §1681g(a)(3).', { indent: true }),
-    makeBody('D.  DISPUTE AND INVESTIGATION RECORDS — All records of any disputes I have filed, the results of all investigations, and the method of verification used for each disputed item, per §1681i(c).', { indent: true }),
-    makeBody('E.  SUPPRESSION AND FLAG RECORDS — Any §1681i(a)(5)(A) suppression flags placed on disputed items, and all "In Dispute" notations currently in my file.', { indent: true }),
-    makeBody('F.  SCORING INFORMATION — Any credit score, risk score, or other numerical assessment derived from my file, along with the key factors affecting the score.', { indent: true }),
-
-    makeSectionHeading('III', 'FORMAT REQUIREMENTS'),
-    makeBody('The disclosure must be provided in a clear and accurate format that is easy to understand, pursuant to §1681g(a) and §1681h(e). Specifically:'),
-    makeBody('• All account numbers must be provided in FULL — no truncation with X\'s or asterisks', { indent: true }),
-    makeBody('• All dates must be clearly stated in MM/DD/YYYY format', { indent: true }),
-    makeBody('• All balance, credit limit, and payment history fields must be complete', { indent: true }),
-    makeBody('• The disclosure must be mailed to the address above within fifteen (15) days of receipt of this demand', { indent: true }),
-
-    makeSectionHeading('IV', 'COMPLIANCE TIMELINE & LEGAL CONSEQUENCES'),
-    makeBody('You are required to comply with this demand within fifteen (15) days of receipt per §1681g and §1681j. Failure to provide the requested disclosure may subject your organization to civil liability under §1681n (willful noncompliance: $100–$1,000 per violation plus punitive damages) or §1681o (negligent noncompliance: actual damages plus attorney\'s fees).'),
-
-    makeSectionHeading('V', 'ENCLOSED DOCUMENTATION'),
-    makeBody('The following identification documents are enclosed to verify my identity:'),
-    makeBody('☐  Government-issued photo identification (front and back)', { indent: true }),
-    makeBody('☐  Proof of current address (utility bill, bank statement, or lease within 60 days)', { indent: true }),
-
-    ...makeSignatureBlock(consumer.name || '[Consumer Name]', consumer.address || '[Consumer Address]', today),
+    makeBody('To whom it may concern:'),
+    makeBody('Please send me a complete copy of my consumer file — all of the information you have about me at the time of this request, not just the standard credit report you normally mail out. Please include everything in the file, the sources of that information, and a list of everyone who has received a report about me. Please also include full account numbers, not shortened or masked ones, so I can actually check the accounts against my own records.'),
+    makeBody(`So you can be sure this request really is from me, I have enclosed a copy of my government-issued photo ID and ${proofName} showing my name and current address.`),
+    makeBody(`If anything about my request is unclear, please write to me at my address above or call me at ${phone}. Thank you.`),
+    blank(120),
+    makeBody('Sincerely,'),
+    blank(200),
+    makeBody('_________________________________'),
+    makeBody(consumer.name || '[Consumer Name]', { bold: true }),
+    makeBody(consumer.address || '[Consumer Address]'),
+    blank(120),
+    makeBody('Enclosures:', { bold: true }),
+    makeBody('1.  Copy of my government-issued photo ID', { indent: true }),
+    makeBody(`2.  Copy of ${proofName} showing my name and current address`, { indent: true }),
+    blank(80),
+    makeBody('For my records — certified mail tracking:', { bold: true }),
+    makeBody('Tracking #: ________________________________   Date mailed: ____________________', { indent: true }),
   ];
 
   const doc = makeDoc(children);
@@ -464,10 +493,11 @@ async function generateFileDisclosureDocx(consumer, outputPath) {
 async function generateMailingInstructionsDocx(violationsData, outputPath) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   const consumer = (violationsData && violationsData.consumer) || {};
-  const furnishers = (violationsData && violationsData.furnishers) || [];
+  const furnishers = ((violationsData && violationsData.furnishers) || []).filter(f => (f.violations || []).length > 0);
   const cra = getCRA(consumer.bureau);
 
-  // Calculate 30-day deadline
+  // Printed as guidance only — the campaign tracker computes the real
+  // deadlines from the date you actually mail.
   const mailingDate = new Date();
   const deadline = new Date(mailingDate);
   deadline.setDate(deadline.getDate() + 30);
@@ -476,50 +506,52 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
   const children = [
     makeBanner('CERTIFIED MAILING INSTRUCTIONS & 30-DAY TIMELINE'),
     blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Mailing Date: ${today}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Generated: ${today}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     makeHRule(),
 
     makeSectionHeading('I', 'OVERVIEW — CERTIFIED MAIL PACKAGES'),
-    makeBody('You will be sending the following certified mail packages. Each must be sent separately with its own tracking number:'),
+    makeBody('You will send the following certified mail packages. Each goes in its own envelope with its own tracking number and its own green return-receipt card. NEVER dispute online — you cannot prove what you said, and it is hard to attach your documents. Certified paper mail is the foundation of the record.'),
     blank(80),
   ];
 
-  // Overview table
   const tableRows = [
-    ['#', 'Recipient', 'Address', 'Contents'],
-    ['1', cra.name, `${cra.addr}, ${cra.city}`, `All dispute letters + File Disclosure + highlighted report + ID`],
+    ['1', cra.name, `${cra.addr}, ${cra.city}`, 'Dispute letter + photo ID + proof of address + circled report pages'],
+    ['2', cra.name, `${cra.addr}, ${cra.city}`, 'Full-file request letter + photo ID + proof of address (SEPARATE envelope)'],
     ...furnishers.map((f, i) => [
-      String(i + 2),
+      String(i + 3),
       f.name,
-      f.address || '[See furnisher address on letter]',
-      `Furnisher demand letter for ${(f.accounts || []).length} account(s)`,
+      f.address || '[Address as shown on the credit report / dispute letter cc list]',
+      'COMPLETE copy of the dispute letter with ALL enclosures',
     ]),
   ];
-
-  children.push(makeSimpleTable(tableRows[0], tableRows.slice(1)));
+  children.push(makeSimpleTable(['#', 'Recipient', 'Address', 'Contents'], tableRows));
   children.push(blank());
 
-  children.push(makeSectionHeading('II', 'ENVELOPE-BY-ENVELOPE ASSEMBLY INSTRUCTIONS'));
+  children.push(makeSectionHeading('II', 'ENVELOPE-BY-ENVELOPE ASSEMBLY'));
 
-  // Package 1: CRA
-  children.push(makeSubHeading(`PACKAGE 1: ${cra.name}`));
+  children.push(makeSubHeading(`PACKAGE 1: ${cra.name} — THE DISPUTE`));
   children.push(makeBody(`Address: ${cra.name}, ${cra.dept}, ${cra.addr}, ${cra.city}`));
-  children.push(makeBody('Contents checklist:'));
-  children.push(makeBody('☐  All dispute letters (one per furnisher)', { indent: true }));
-  children.push(makeBody('☐  File Disclosure Demand letter', { indent: true }));
-  children.push(makeBody('☐  Highlighted and annotated copy of credit report', { indent: true }));
+  children.push(makeBody('☐  Signed dispute letter (date it the day you mail it)', { indent: true }));
+  children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
+  children.push(makeBody('☐  Proof of current address (utility bill or bank statement, dated within 60 days)', { indent: true }));
+  children.push(makeBody('☐  Credit report pages with the errors circled in red (use the annotated copy or mark a fresh copy per the Markup Map)', { indent: true }));
+  children.push(blank(80));
+
+  children.push(makeSubHeading(`PACKAGE 2: ${cra.name} — THE FULL-FILE REQUEST`));
+  children.push(makeBody(`Address: same as Package 1 — but a SEPARATE envelope with its own tracking number.`));
+  children.push(makeBody('☐  Signed full-file request letter (date it the day you mail it)', { indent: true }));
   children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
   children.push(makeBody('☐  Proof of current address (dated within 60 days)', { indent: true }));
   children.push(blank(80));
 
-  // Packages for each furnisher
   furnishers.forEach((f, i) => {
-    children.push(makeSubHeading(`PACKAGE ${i + 2}: ${f.name.toUpperCase()}`));
-    children.push(makeBody(`Address: ${f.address || '[Furnisher address — see dispute letter CC block]'}`));
-    children.push(makeBody('Contents checklist:'));
-    children.push(makeBody('☐  Copy of the dispute letter sent to the CRA', { indent: true }));
+    children.push(makeSubHeading(`PACKAGE ${i + 3}: ${f.name.toUpperCase()} — COURTESY COPY OF THE DISPUTE`));
+    children.push(makeBody(`Address: ${f.address || '[Furnisher address — from the credit report or the letter\'s cc list]'}`));
+    children.push(makeBody('☐  COMPLETE copy of the dispute letter', { indent: true }));
     children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
     children.push(makeBody('☐  Proof of current address (dated within 60 days)', { indent: true }));
+    children.push(makeBody('☐  Credit report pages with the errors circled in red', { indent: true }));
+    children.push(makeBody('Why: the furnisher is judged by the notice it had. This copy does not replace the CRA dispute — it makes sure the furnisher has your full letter when the CRA\'s notice arrives.', { indent: true, italic: true }));
     children.push(blank(80));
   });
 
@@ -528,225 +560,44 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
     'Bring all sealed envelopes and a valid government-issued ID.',
     'Request "Certified Mail with Return Receipt Requested" for EACH envelope.',
     'The postal clerk will affix green-and-white tracking barcodes to each envelope.',
-    'Request the white PS Form 3811 (green card) for EACH envelope — write the recipient name on the "Article Addressed To" line.',
+    'Request the PS Form 3811 (green card) for EACH envelope — write the recipient name on the "Article Addressed To" line.',
     'Keep all receipts and tracking numbers. Write each tracking number on your copy of the corresponding letter.',
     'Take a clear photo of each sealed envelope before handing it to the clerk.',
+    'When you get home, enter the mail date and every tracking number into the campaign tracker — that is what starts the real deadline clock.',
     'Estimated cost: $7–$9 per package (certified mail + return receipt).',
   ];
   poSteps.forEach((s, i) => children.push(makeBody(`${i + 1}.  ${s}`, { indent: true, before: 60 })));
 
-  children.push(makeSectionHeading('IV', '30-DAY INVESTIGATION TIMELINE'));
+  children.push(makeSectionHeading('IV', '30-DAY INVESTIGATION TIMELINE (GUIDANCE)'));
+  children.push(makeBody('The dates below assume you mail today; the campaign tracker computes the binding dates from the mail date and delivery date you enter.'));
   const timeline = [
-    ['Day 0', today, 'Mail all packages via Certified Mail. Save all tracking numbers and receipts.'],
-    ['Day 3–5', '', `${cra.name} and furnishers receive packages. Clock starts on 30-day investigation period.`],
-    ['Day 5', '', `${cra.name} must forward dispute to ${furnishers.map(f => f.name).join(', ')} per §1681i(a)(2).`],
-    ['Day 15', '', 'Optional: Call CRA consumer line to confirm dispute receipt. Note representative name and time.'],
-    ['Day 30', deadlineStr, `FCRA §1681i(a)(1) DEADLINE: ${cra.name} must complete reinvestigation and send results.`],
-    ['Day 35', '', 'If corrections made: Updated report should appear. Pull a new credit report to verify.'],
+    ['Day 0', today, 'Mail all packages via Certified Mail. Save all tracking numbers and receipts. Log them in the tracker.'],
+    ['Day 3–5', '', `${cra.name} receives the packages. The 30-day reinvestigation clock starts on receipt.`],
+    ['Day 5', '', `${cra.name} must forward the dispute to ${furnishers.map(f => f.name).join(', ') || 'the furnisher(s)'} within 5 business days.`],
+    ['Day 15', '', 'Optional: call the CRA consumer line to confirm receipt. Log the call — date, time, representative name.'],
+    ['Day 30', deadlineStr, `${cra.name} must complete the reinvestigation and send you the results.`],
+    ['Day 35', '', 'Pull a fresh credit report and start the response intake — upload the results letter and the new report.'],
   ];
-  children.push(makeSimpleTable(['Timeline', 'Date', 'Action Required'], timeline));
+  children.push(makeSimpleTable(['Timeline', 'Date', 'Action'], timeline));
   children.push(blank());
 
-  children.push(makeSectionHeading('V', `IF ${cra.name.split(' ')[0]} DOES NOT RESPOND`));
-  children.push(makeBody('If you do not receive a response within 30 days of confirmed delivery:'));
-  children.push(makeBody('1.  File a complaint with the Consumer Financial Protection Bureau (CFPB) at consumerfinance.gov/complaint — use your certified mail tracking number as proof.', { indent: true }));
-  children.push(makeBody('2.  File a complaint with the Federal Trade Commission (FTC) at ftc.gov/complaint.', { indent: true }));
-  children.push(makeBody('3.  Consult a consumer rights attorney regarding civil litigation under FCRA §1681n (willful noncompliance, up to $1,000 per violation + attorney\'s fees).', { indent: true }));
+  children.push(makeSectionHeading('V', 'WHEN THE RESULTS ARRIVE (OR DON\'T)'));
+  children.push(makeBody('When the results of investigation arrive: save the letter, pull a fresh report, and run the response intake in the app — it compares every disputed item against the new report and builds the next step (a final-notice round or the litigation memo).', { indent: true }));
+  children.push(makeBody('Call the bureau after the results arrive and ask about anything not fixed. Log the call in the tracker. This removes their "you should have called us" argument and shows the dispute is serious to you.', { indent: true }));
+  children.push(makeBody('If a "suspicious mail" / "we don\'t think this is you" letter arrives instead: do NOT start over. Re-send the identical letter with the same ID and proof of address, log it, and keep the stall letter — their refusal to investigate is part of the record.', { indent: true }));
+  children.push(makeBody('If there is no response within 30 days of confirmed delivery: file a CFPB complaint at consumerfinance.gov/complaint using your tracking number as proof, and note the non-response in the tracker — a no-investigation is worse for them than a bad investigation.', { indent: true }));
 
   children.push(makeSectionHeading('VI', "DO'S AND DON'TS"));
   children.push(makeBody('DO:', { bold: true }));
-  children.push(makeBody('✓  Keep copies of everything — letters, tracking receipts, green return receipt cards', { indent: true }));
-  children.push(makeBody('✓  Pull a new credit report after 35 days to verify corrections', { indent: true }));
-  children.push(makeBody('✓  Document all phone calls (date, time, representative name, confirmation #)', { indent: true }));
+  children.push(makeBody('✓  Keep signed copies of every letter WITH its attachments — paper, scanned, and cloud', { indent: true }));
+  children.push(makeBody('✓  Date each letter the day you actually mail it', { indent: true }));
+  children.push(makeBody('✓  Pull a new credit report after 35 days and run the response intake', { indent: true }));
+  children.push(makeBody('✓  Document every phone call (date, time, representative name, what was said)', { indent: true }));
   children.push(makeBody("DON'T:", { bold: true }));
+  children.push(makeBody('✗  Dispute online — you cannot prove what you said', { indent: true }));
   children.push(makeBody('✗  Apply for new credit during the dispute period', { indent: true }));
-  children.push(makeBody('✗  Accept a "verification" response without demanding the method of verification', { indent: true }));
-  children.push(makeBody('✗  Miss the 30-day window — set a calendar reminder for today + 30 days', { indent: true }));
-
-  children.push(makeSectionHeading('VII', 'EXPECTED OUTCOMES'));
-  children.push(makeBody('Based on the violations identified in this dispute package:'));
-  children.push(makeBody('• Best case (all accounts deleted): +100 to +150 credit score points', { indent: true }));
-  children.push(makeBody('• Likely case (mix of deletions and corrections): +50 to +100 points', { indent: true }));
-  children.push(makeBody('• Minimum case (corrections only, no deletions): +20 to +50 points', { indent: true }));
-
-  const doc = makeDoc(children);
-  const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(outputPath, buffer);
-}
-
-// ─── HIGHLIGHTING GUIDE ───────────────────────────────────────────────────────
-
-async function generateHighlightingGuideDocx(violationsData, outputPath) {
-  const consumer = (violationsData && violationsData.consumer) || {};
-  const furnishers = (violationsData && violationsData.furnishers) || [];
-
-  const children = [
-    makeBanner('CREDIT REPORT HIGHLIGHTING GUIDE'),
-    blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Bureau: ${consumer.bureau || 'Experian'}   |   Report Date: ${consumer.reportDate || ''}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    makeHRule(),
-
-    makeSectionHeading('I', 'SUPPLIES NEEDED'),
-    makeBody('Before you begin, gather the following supplies:'),
-    makeBody('• Yellow highlighter — for account identifiers and key fields', { indent: true }),
-    makeBody('• Red highlighter or red pen — for violations and inaccuracies', { indent: true }),
-    makeBody('• Orange highlighter — for financial figures (balances, amounts)', { indent: true }),
-    makeBody('• Green highlighter or green pen — for margin notes and annotations', { indent: true }),
-    makeBody('• Blue or black ballpoint pen — for writing margin notes', { indent: true }),
-    makeBody('• Ruler — for neat underlining', { indent: true }),
-    makeBody('• Extra copies of your credit report (you will need one copy per recipient in your mailing package)', { indent: true }),
-    blank(80),
-
-    makeSectionHeading('II', 'COLOR CODE SYSTEM'),
-    makeSimpleTable(
-      ['Color', 'What to Highlight', 'Examples'],
-      [
-        ['YELLOW', 'Account identifiers, names, numbers, key fields', 'Account name, account number, date opened, credit limit'],
-        ['RED', 'Violations — inaccurate, missing, or incorrect data', 'Truncated account #, missing DOFD, wrong status code, ND payment history'],
-        ['ORANGE', 'Financial figures that are disputed or inconsistent', 'Balance vs. Past Due mismatch, unexplained charge-off amount, over-limit balance'],
-        ['GREEN', 'Margin notes — write your annotation beside the highlighted field', '"MISSING — demand deletion", "TRUNCATED — §1681g(a)(1)", "ND = NO DATA — violation"'],
-      ]
-    ),
-    blank(),
-
-    makeSectionHeading('III', 'PAGE-BY-PAGE MARKING INSTRUCTIONS'),
-    makeBody('Follow these instructions for each account. Work page by page in order.'),
-    blank(80),
-  ];
-
-  // Per-furnisher/account instructions
-  let violationCount = 0;
-  for (const furnisher of furnishers) {
-    children.push(makeSubHeading(`FURNISHER: ${furnisher.name.toUpperCase()}`));
-
-    const accounts = furnisher.accounts || [];
-    const violations = furnisher.violations || [];
-
-    for (const acct of accounts) {
-      const acctViolations = violations.filter(v =>
-        !v.accountName || v.accountName === acct.accountName || v.accountName === acct.accountNumber
-      );
-
-      children.push(new Paragraph({
-        spacing: { before: 120, after: 60 },
-        children: [new TextRun({ text: `Account: ${acct.accountName || acct.accountNumber || 'Unknown'}  |  Status: ${acct.status || 'N/A'}  |  Balance: ${acct.balance || 'N/A'}`, size: sz(FONT_BODY), font: FONT, bold: true })],
-      }));
-
-      if (acctViolations.length === 0 && violations.length > 0) {
-        // Use all violations for this furnisher if no account-specific ones
-        for (const v of violations) {
-          violationCount++;
-          children.push(makeBody(`${violationCount}. [RED] Highlight: "${v.title}" — Write in margin: "VIOLATION #${v.number}: ${v.statute || 'FCRA Violation'}"`, { indent: true }));
-        }
-      } else {
-        for (const v of acctViolations) {
-          violationCount++;
-          const color = v.severity === 'CRITICAL' ? 'RED' :
-                        v.severity === 'HIGH' ? 'RED' : 'ORANGE';
-          children.push(makeBody(`${violationCount}. [${color}] ${v.title}`, { indent: true, bold: true }));
-          children.push(makeBody(`Highlight: The ${guessField(v)} field on this account`, { indent: true }));
-          children.push(makeBody(`Write in margin: "VIOLATION #${v.number} — ${v.statute || 'See dispute letter'}"`, { indent: true }));
-          children.push(blank(40));
-        }
-      }
-    }
-
-    // If no accounts listed but violations exist
-    if (accounts.length === 0 && violations.length > 0) {
-      for (const v of violations) {
-        violationCount++;
-        children.push(makeBody(`${violationCount}. [RED] ${v.title} — Write in margin: "VIOLATION #${v.number}: ${v.statute || 'FCRA Violation'}"`, { indent: true }));
-      }
-    }
-  }
-
-  children.push(makeSectionHeading('IV', 'FINAL REVIEW CHECKLIST'));
-  children.push(makeBody('Before sealing your envelopes, verify:'));
-  children.push(makeBody('☐  Every account with a dispute letter has highlighted violations marked in red', { indent: true }));
-  children.push(makeBody('☐  Every red highlight has a margin note citing the violation number and statute', { indent: true }));
-  children.push(makeBody('☐  Financial figure discrepancies are highlighted in orange', { indent: true }));
-  children.push(makeBody('☐  You have made enough copies (one set for each recipient + one for your records)', { indent: true }));
-  children.push(makeBody('☐  Report pages are in order and all pages are included', { indent: true }));
-
-  children.push(makeSectionHeading('V', 'COPY REQUIREMENTS'));
-  children.push(makeBody('You will need the following copies of your highlighted credit report:'));
-  children.push(makeBody('☐  1 copy — For the CRA (include in your main dispute package envelope)', { indent: true }));
-  const cra = getCRA(consumer.bureau);
-  furnishers.forEach((f, i) => {
-    children.push(makeBody(`☐  1 copy — For ${f.name} (include in furnisher package #${i + 2})`, { indent: true }));
-  });
-  children.push(makeBody('☐  1 copy — For your personal records', { indent: true }));
-
-  const doc = makeDoc(children);
-  const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(outputPath, buffer);
-}
-
-// ─── FACTUAL ONE-ROUND DISPUTE LETTER (closed-universe audit style) ───────────
-
-function factualWording(v) {
-  if (v.disputeWording) return v.disputeWording;
-  // Fallback: build a short factual line from the structured fields
-  const base = v.reportShows && v.reportShows !== 'FIELD NOT PRESENT'
-    ? `The report shows "${v.reportShows}" for ${v.title ? v.title.toLowerCase() : 'this field'}, which is inaccurate or inconsistent.`
-    : `${v.title ? v.title.charAt(0) + v.title.slice(1).toLowerCase() : 'A required field'} is missing or blank on this account.`;
-  return `${base} Please fix or delete this entire account.`;
-}
-
-async function generateFactualDisputeLetterDocx(violationsData, outputPath) {
-  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const consumer = (violationsData && violationsData.consumer) || {};
-  const furnishers = (violationsData && violationsData.furnishers) || [];
-  const cra = getCRA(consumer.bureau);
-
-  const children = [
-    makeBody(today, { bold: true }),
-    blank(),
-    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    makeBody(cra.dept),
-    makeBody(cra.addr),
-    makeBody(cra.city),
-    blank(),
-    makeBody(`From: ${consumer.name || '[Consumer Name]'}`),
-    makeBody(consumer.address || '[Consumer Address]'),
-    blank(),
-    makeBody('RE: Dispute of inaccurate, incomplete, and contradictory information on my credit report', { bold: true }),
-    makeBody(`Report date: ${consumer.reportDate || today}`),
-    makeHRule(),
-    makeBody('To whom it may concern:'),
-    makeBody('I am writing to dispute several inaccuracies in my credit report regarding the accounts listed below. I have reviewed my credit report and found multiple errors — information that is missing, incomplete, or contradicts other information on the same report — that require correction.'),
-    makeBody('Per my rights under the FCRA, I request that you investigate the following inaccuracies:'),
-    blank(80),
-  ];
-
-  let itemNo = 0;
-  for (const f of furnishers) {
-    const violations = f.violations || [];
-    if (violations.length === 0) continue;
-    const acctNums = (f.accounts || []).map(a => a.accountNumber).filter(Boolean).join(', ');
-    children.push(makeSubHeading(`${f.name.toUpperCase()}${acctNums ? ` — Account ${acctNums}` : ''}`));
-    for (const v of violations) {
-      itemNo++;
-      children.push(new Paragraph({
-        spacing: { before: 60, after: 60 },
-        indent: { left: 360 },
-        children: [
-          new TextRun({ text: `${itemNo}.  `, bold: true, size: sz(FONT_BODY), font: FONT }),
-          new TextRun({ text: factualWording(v), size: sz(FONT_BODY), font: FONT }),
-        ],
-      }));
-    }
-  }
-
-  children.push(blank(80));
-  children.push(makeBody('Please investigate each numbered item above. If any item cannot be verified as complete and accurate, delete the account from my credit file. Please correct or delete these items, send me an updated copy of my credit report showing the results of your investigation, and notify anyone who received my report in the past six months of the corrections, as applicable.'));
-  children.push(makeBody('Thank you for your prompt attention to this matter.'));
-  children.push(blank(160));
-  children.push(makeBody('Sincerely,'));
-  children.push(blank(200));
-  children.push(makeBody('_________________________________'));
-  children.push(makeBody(consumer.name || '[Consumer Name]', { bold: true }));
-  children.push(makeBody(consumer.address || '[Consumer Address]'));
+  children.push(makeBody('✗  Accept a "verified" response without asking how it was verified', { indent: true }));
+  children.push(makeBody('✗  Miss the 30-day window — the tracker will count it down for you', { indent: true }));
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);
@@ -764,7 +615,7 @@ async function generateMarkupMapDocx(violationsData, outputPath) {
     blank(),
     new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Consumer: ${consumer.name || '[Consumer Name]'}   |   Bureau: ${consumer.bureau || ''}   |   Report Date: ${consumer.reportDate || ''}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     makeHRule(),
-    makeBody('Every numbered item below matches the same item number in the Factual Dispute Letter. On your copy of the credit report: draw a RED BOX around each field or payment-history cell listed. Boxes only — do NOT write numbers on the report. When one item lists two locations, box BOTH locations.'),
+    makeBody('Every numbered item below matches the same item number in the Dispute Letter. On your copy of the credit report: draw a RED BOX around each field or payment-history cell listed. Boxes only — do NOT write numbers on the report. When one item lists two locations, box BOTH locations.'),
     blank(80),
   ];
 
@@ -814,32 +665,10 @@ async function generateMarkupMapDocx(violationsData, outputPath) {
   fs.writeFileSync(outputPath, buffer);
 }
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function numberWord(n) {
-  const words = ['', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE', 'TEN'];
-  return words[n] || String(n);
-}
-
-function guessField(v) {
-  const t = (v.title + ' ' + (v.description || '')).toLowerCase();
-  if (t.includes('account number') || t.includes('truncat')) return 'account number';
-  if (t.includes('dofd') || t.includes('first delinquency')) return 'Date of First Delinquency (DOFD)';
-  if (t.includes('credit limit')) return 'Credit Limit';
-  if (t.includes('payment history') || t.includes('nd') || t.includes('no data')) return 'Payment History Profile';
-  if (t.includes('balance') || t.includes('past due')) return 'Balance / Past Due Amount';
-  if (t.includes('date closed')) return 'Date Closed';
-  if (t.includes('charge-off') || t.includes('original charge')) return 'Original Charge-Off Amount';
-  if (t.includes('status')) return 'Account Status Code';
-  if (t.includes('terms')) return 'Terms/Account Type';
-  return 'disputed field';
-}
-
 module.exports = {
-  generateDisputeLetterDocx,
+  generateWattsLetterDocx,
+  generateLitigationMemoDocx,
   generateFileDisclosureDocx,
   generateMailingInstructionsDocx,
-  generateHighlightingGuideDocx,
-  generateFactualDisputeLetterDocx,
   generateMarkupMapDocx,
 };
