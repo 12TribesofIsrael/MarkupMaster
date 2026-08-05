@@ -10,7 +10,7 @@ const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const cookieParser = require('cookie-parser');
-const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx } = require('./docx-generator');
+const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx, generateResultsDiffDocx, generateMovLetterDocx } = require('./docx-generator');
 const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
 const store = require('./db');
 
@@ -111,6 +111,58 @@ async function loadKnowledge() {
 // ─── Anthropic client ─────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Stream a completion with the shared system prompt. Sonnet supports up to
+// 64K output tokens but requires streaming at that size; when a big report
+// exceeds the ceiling, feed the partial text back as an assistant prefill so
+// the model continues exactly where it stopped, and stitch the rounds.
+async function callClaude(userContentBlocks, sessionId) {
+  const baseMessages = [{ role: 'user', content: userContentBlocks }];
+  const MAX_CONTINUATIONS = 3;
+  let responseText = '';
+  for (let round = 0; round <= MAX_CONTINUATIONS; round++) {
+    // The API rejects assistant prefill ending in whitespace — trim before resuming.
+    responseText = responseText.replace(/\s+$/, '');
+    const messages = responseText
+      ? [...baseMessages, { role: 'assistant', content: responseText }]
+      : baseMessages;
+    const stream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 64000,
+      system: SYSTEM_PROMPT,
+      messages,
+    });
+    const response = await stream.finalMessage();
+    const textBlock = response.content.find((b) => b.type === 'text');
+    responseText += textBlock ? textBlock.text : '';
+    console.log(`[${sessionId}] Claude round ${round + 1}: ${Math.round(responseText.length / 1000)}k chars total, stop_reason=${response.stop_reason}`);
+    if (response.stop_reason !== 'max_tokens') break;
+    console.warn(`[${sessionId}] Hit max_tokens — requesting continuation ${round + 1}/${MAX_CONTINUATIONS}...`);
+  }
+  return responseText;
+}
+
+// Extract a tagged JSON block from a model response, tolerating truncation.
+function extractTaggedJson(responseText, tag, sessionId) {
+  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+  const m = responseText.match(re);
+  let jsonText = m ? m[1] : null;
+  if (!jsonText) {
+    const openIdx = responseText.indexOf(`<${tag}>`);
+    if (openIdx !== -1) {
+      console.warn(`[${sessionId}] Closing ${tag} tag missing — attempting truncated-JSON salvage.`);
+      jsonText = responseText.slice(openIdx + tag.length + 2);
+    }
+  }
+  if (!jsonText) return null;
+  try { return JSON.parse(jsonText.trim()); }
+  catch (e) {
+    const repaired = repairTruncatedJson(jsonText);
+    if (repaired) console.warn(`[${sessionId}] Recovered ${tag} via truncation repair.`);
+    else console.warn(`[${sessionId}] ${tag} parse failed even after repair:`, e.message);
+    return repaired;
+  }
+}
+
 // ─── Truncated-JSON salvage ───────────────────────────────────────────────────
 // Returns the closing brackets needed to balance `s`, or null if `s` ends inside a string.
 function unclosedBrackets(s) {
@@ -195,9 +247,14 @@ app.post('/api/campaigns/:id/events', requirePin, (req, res) => {
 app.patch('/api/rounds/:id', requirePin, (req, res) => {
   const round = store.updateRound(Number(req.params.id), req.body || {}, (req.body || {}).evidence_path);
   if (!round) return res.status(404).json({ error: 'Round not found.' });
-  // Mailing a round marks its open items as sent.
+  // Mailing a round marks its open items as sent; rounds 2/3 also re-send the
+  // items the bureau previously verified without fixing.
   if ((req.body || {}).mail_date && round.run_id) {
     store.setItemsStatusByRun(round.run_id, 'open', `round${round.round_number}_sent`, round.round_number);
+    if (round.round_number >= 2) {
+      store.db.prepare(`UPDATE violation_items SET status=?, status_round=? WHERE campaign_id=? AND status='verified_unchanged'`)
+        .run(`round${round.round_number}_sent`, round.round_number, round.campaign_id);
+    }
   }
   res.json(round);
 });
@@ -343,6 +400,250 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
   } catch (err) {
     console.error('generate failed:', err);
     res.status(500).json({ error: err.message || 'Generation failed.' });
+  }
+});
+
+// ─── Response intake: results letter + fresh report → item-by-item outcomes ──
+
+function buildIntakePrompt(priorItems) {
+  return `COMPARE THE ATTACHED DOCUMENTS AGAINST THE CONSUMER'S PRIOR DISPUTE ITEMS.
+
+The attachments are the credit bureau's results-of-investigation letter and/or a fresh copy of the
+consumer's credit report, received AFTER the dispute below was investigated.
+
+PRIOR DISPUTED ITEMS (JSON):
+${JSON.stringify(priorItems, null, 1)}
+
+For EVERY prior item, decide the outcome:
+- "fixed" — the results letter or the fresh report shows the specific defect was corrected
+- "deleted" — the account/tradeline no longer appears on the fresh report, or the results say deleted
+- "verified_unchanged" — the bureau says verified/accurate AND/OR the same defect is still visible unchanged
+- "unclear" — the attached documents do not show the outcome for this item
+
+GROUNDING RULES (violation of these is failure):
+1. Base every outcome ONLY on what you can literally read in the attachments. Never guess.
+2. For every outcome except "unclear", quote the exact sentence, field, or value that proves it
+   ("evidenceQuote") and, for "fixed", the new value ("newValue").
+3. When in doubt, use "unclear". An "unclear" is always better than a wrong classification.
+4. There is NO required distribution of outcomes. All-verified, all-fixed, and any mix are all valid results.
+
+Also list any NEW violations the changes introduced (e.g. a "correction" that created a new
+contradiction) under "newViolations", using the SAME violation object schema as the original
+analysis (accountName, title, severity, statute, issueType, reportShows, shouldShow, description,
+impact, precedent, demand, disputeWording, remedyType, remedyWording, internalContradiction, markup).
+Also include a "furnisher" field on each new violation naming the furnisher exactly. Only report
+clear, literally-readable defects — an empty list is a valid result.
+
+CRITICAL OUTPUT RULE: Your ENTIRE response must be ONLY the <INTAKE_JSON>...</INTAKE_JSON> block:
+<INTAKE_JSON>
+{
+  "outcomes": [ { "item": 1, "outcome": "fixed|deleted|verified_unchanged|unclear", "newValue": "... or null", "evidenceQuote": "... or null" } ],
+  "newViolations": []
+}
+</INTAKE_JSON>`;
+}
+
+app.post('/api/campaigns/:id/intake', requirePin, (req, res, next) => {
+  req.sessionId = uuidv4();
+  next();
+}, upload.array('files', 10), async (req, res) => {
+  const sessionId = req.sessionId;
+  try {
+    const campaignId = Number(req.params.id);
+    const campaign = store.getCampaign(campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'Upload the results letter and/or the fresh report.' });
+
+    // Target = latest mailed round still waiting on results.
+    const round = store.db.prepare(
+      `SELECT * FROM rounds WHERE campaign_id=? AND mail_date IS NOT NULL AND results_received_date IS NULL
+       ORDER BY round_number DESC LIMIT 1`).get(campaignId);
+    if (!round) return res.status(400).json({ error: 'No mailed round is waiting on results. Enter the mail date on the round first.' });
+
+    const pendingStatuses = ['open', 'round1_sent', 'round2_sent', 'round3_sent', 'verified_unchanged'];
+    const items = store.getItems(campaignId).filter(i => i.run_id === round.run_id || pendingStatuses.includes(i.status));
+    const pending = items.filter(i => pendingStatuses.includes(i.status));
+    if (pending.length === 0) return res.status(400).json({ error: 'No pending items to compare.' });
+
+    const priorItems = pending.map(i => {
+      const d = JSON.parse(i.detail_json || '{}');
+      return {
+        item: i.item_number, furnisher: i.furnisher_name, account: i.account_name,
+        title: i.title, reportShows: d.reportShows || null,
+        disputeWording: d.disputeWording || null, remedyWording: d.remedyWording || null,
+      };
+    });
+
+    // Content blocks: attachments + intake prompt.
+    const blocks = [{ type: 'text', text: buildIntakePrompt(priorItems) }];
+    for (const file of req.files) {
+      const ext = path.extname(file.originalname).toLowerCase();
+      const base64 = fs.readFileSync(file.path).toString('base64');
+      blocks.push(ext === '.pdf'
+        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+        : { type: 'image', source: { type: 'base64', media_type: ext === '.png' ? 'image/png' : 'image/jpeg', data: base64 } });
+    }
+
+    console.log(`[${sessionId}] Intake: comparing ${pending.length} items against ${req.files.length} file(s)...`);
+    const responseText = await callClaude(blocks, sessionId);
+
+    const outputDir = path.join(__dirname, 'outputs', sessionId);
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(path.join(outputDir, 'raw_response.txt'), responseText);
+
+    const intake = extractTaggedJson(responseText, 'INTAKE_JSON', sessionId);
+    if (!intake || !Array.isArray(intake.outcomes)) {
+      return res.status(500).json({ error: 'Could not parse the intake comparison. Check raw_response.txt and try again.' });
+    }
+
+    // Apply outcomes. The human always has the final word — "unclear" stays
+    // pending and is classified by hand in the UI.
+    const byNumber = {};
+    pending.forEach(i => { byNumber[i.item_number] = i; });
+    const groups = { fixed: [], deleted: [], verified_unchanged: [], unclear: [] };
+    for (const o of intake.outcomes) {
+      const item = byNumber[o.item];
+      if (!item) continue;
+      const outcome = ['fixed', 'deleted', 'verified_unchanged'].includes(o.outcome) ? o.outcome : 'unclear';
+      const d = JSON.parse(item.detail_json || '{}');
+      groups[outcome].push({
+        item: item.item_number, furnisher: item.furnisher_name, account: item.account_name,
+        title: item.title, before: d.reportShows || null,
+        newValue: o.newValue || null, evidenceQuote: o.evidenceQuote || null,
+      });
+      if (outcome !== 'unclear') store.setItemStatus(item.id, outcome, round.round_number);
+    }
+
+    // Store the uploaded results/report files with the campaign.
+    const destDir = path.join(store.DATA_DIR, 'files', String(campaignId), sessionId);
+    fs.mkdirSync(destDir, { recursive: true });
+    const stored = [];
+    for (const file of req.files) {
+      const dest = path.join(destDir, path.basename(file.originalname));
+      fs.copyFileSync(file.path, dest);
+      stored.push(dest);
+    }
+    const resultsDate = (req.body.results_date || new Date().toISOString().slice(0, 10));
+    store.createReport({ campaign_id: campaignId, kind: 'results_letter', file_paths: stored, report_date: resultsDate });
+    store.createRun({ campaign_id: campaignId, session_uuid: sessionId, purpose: 'intake_diff' });
+
+    // Results date drives the SOL and the chronology.
+    store.updateRound(round.id, { results_received_date: resultsDate });
+
+    // Diff report.
+    const diff = { roundNumber: round.round_number, resultsDate, groups };
+    fs.writeFileSync(path.join(outputDir, 'intake_diff.json'), JSON.stringify(diff, null, 2), 'utf8');
+    await generateResultsDiffDocx(diff, path.join(outputDir, 'Results_Diff.docx'));
+    const files = [{ name: 'Results_Diff.docx', url: `/download/${sessionId}/Results_Diff.docx` }];
+
+    // Load consumer + identity for follow-up letters.
+    const priorRun = store.getRun(round.run_id);
+    const priorData = JSON.parse(fs.readFileSync(runViolationsPath(priorRun), 'utf8'));
+    const client = store.getClient(campaign.client_id);
+    const clientIdentity = client ? {
+      phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
+      dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
+      proofOfAddress: client.proof_of_address || '',
+    } : {};
+
+    // Verified-unchanged items feed the next round (max 3) — and an optional
+    // plain-language MOV request (supporting exhibit, never the case).
+    let nextRound = null;
+    if (groups.verified_unchanged.length > 0) {
+      await generateMovLetterDocx(priorData.consumer, clientIdentity, groups.verified_unchanged, path.join(outputDir, 'MOV_Request.docx'));
+      files.push({ name: 'MOV_Request.docx', url: `/download/${sessionId}/MOV_Request.docx` });
+
+      if (round.round_number < 3) {
+        const keep = new Set(groups.verified_unchanged.map(g => `${g.furnisher}||${g.account}||${g.title}`));
+        const nextData = {
+          ...priorData,
+          furnishers: priorData.furnishers.map(f => ({
+            ...f,
+            violations: (f.violations || []).filter(v => keep.has(`${f.name}||${v.accountName || ''}||${v.title || ''}`)),
+          })).filter(f => (f.violations || []).length > 0)
+            .map(f => ({ ...f, accounts: (f.accounts || []).filter(a => (f.violations || []).some(v => v.accountName === a.accountName)) })),
+        };
+        // Fold in any new violations the "corrections" introduced.
+        const newViolations = (Array.isArray(intake.newViolations) ? intake.newViolations : [])
+          .filter(nv => nv && nv.title && nv.disputeWording);
+        for (const nv of newViolations) {
+          let f = nextData.furnishers.find(x => x.name === nv.furnisher);
+          if (!f) { f = { name: nv.furnisher || 'UNKNOWN FURNISHER', address: null, phone: null, accounts: [], violations: [] }; nextData.furnishers.push(f); }
+          f.violations.push(nv);
+        }
+        nextData.furnishers.forEach(f => f.violations.forEach((v, i) => { v.number = i + 1; }));
+
+        const draftUuid = uuidv4();
+        const draftDir = path.join(__dirname, 'outputs', draftUuid);
+        fs.mkdirSync(draftDir, { recursive: true });
+        fs.writeFileSync(path.join(draftDir, 'violations_data.json'), JSON.stringify(nextData, null, 2), 'utf8');
+        const draftRunId = store.createRun({ campaign_id: campaignId, session_uuid: draftUuid, purpose: 'round_draft' });
+        // Track only the genuinely NEW violations as items — the verified ones
+        // already have rows from the earlier round (status verified_unchanged).
+        let nextNum = store.db.prepare('SELECT MAX(item_number) m FROM violation_items WHERE campaign_id=?').get(campaignId).m || 0;
+        const insNew = store.db.prepare(`INSERT INTO violation_items
+          (campaign_id,run_id,furnisher_name,account_name,item_number,title,severity,statute,issue_type,remedy_type,is_collector,detail_json)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+        for (const nv of newViolations) {
+          nextNum++;
+          insNew.run(campaignId, draftRunId, nv.furnisher || 'UNKNOWN FURNISHER', nv.accountName || null, nextNum,
+            nv.title || null, nv.severity || null, nv.statute || null, nv.issueType || null,
+            nv.remedyType || null, 0, JSON.stringify(nv));
+        }
+        nextRound = store.createRound({ campaign_id: campaignId, round_number: round.round_number + 1, run_id: draftRunId });
+      }
+    }
+
+    res.json({
+      ok: true,
+      diff,
+      files,
+      nextRound,
+      counts: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.length])),
+      solDeadline: store.getCampaign(campaignId).sol_deadline,
+    });
+  } catch (err) {
+    console.error(`[${sessionId}] Intake error:`, err);
+    res.status(500).json({ error: err.message || 'Intake failed.' });
+  }
+});
+
+// Manual item classification — the human always has the final word.
+app.patch('/api/items/:id', requirePin, (req, res) => {
+  const { status, status_round } = req.body || {};
+  const allowed = ['open', 'fixed', 'deleted', 'verified_unchanged', 'escalated'];
+  if (!allowed.includes(status)) return res.status(400).json({ error: `status must be one of ${allowed.join(', ')}` });
+  const item = store.db.prepare('SELECT * FROM violation_items WHERE id=?').get(Number(req.params.id));
+  if (!item) return res.status(404).json({ error: 'Item not found.' });
+  store.setItemStatus(item.id, status, status_round || item.status_round);
+  res.json(store.db.prepare('SELECT * FROM violation_items WHERE id=?').get(item.id));
+});
+
+// Escalate: verified-unchanged items become the lawsuit; memo regenerated.
+app.post('/api/campaigns/:id/escalate', requirePin, async (req, res) => {
+  try {
+    const campaignId = Number(req.params.id);
+    const campaign = store.getCampaign(campaignId);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+    store.db.prepare(`UPDATE violation_items SET status='escalated' WHERE campaign_id=? AND status='verified_unchanged'`).run(campaignId);
+    store.setCampaignStatus(campaignId, 'litigation');
+    store.addEvent({ campaign_id: campaignId, type: 'escalated', event_date: new Date().toISOString().slice(0, 10), details: 'Campaign escalated to litigation posture' });
+
+    // Regenerate the memo from the latest analysis run with the full chronology.
+    const run = store.db.prepare(
+      `SELECT * FROM runs WHERE campaign_id=? AND purpose IN ('round1_analysis','round_draft') ORDER BY created_at DESC LIMIT 1`).get(campaignId);
+    let memoUrl = null;
+    if (run && fs.existsSync(runViolationsPath(run))) {
+      const data = JSON.parse(fs.readFileSync(runViolationsPath(run), 'utf8'));
+      const outputDir = path.join(__dirname, 'outputs', path.basename(run.session_uuid));
+      await generateLitigationMemoDocx(data, { events: store.getEvents(campaignId), solDeadline: campaign.sol_deadline },
+        path.join(outputDir, 'Litigation_Memo.docx'), path.join(outputDir, 'litigation_memo.json'));
+      memoUrl = `/download/${run.session_uuid}/Litigation_Memo.docx`;
+    }
+    res.json({ ok: true, memoUrl });
+  } catch (err) {
+    console.error('Escalate error:', err);
+    res.status(500).json({ error: err.message || 'Escalation failed.' });
   }
 });
 
@@ -729,35 +1030,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
 
     // Call Claude
     console.log(`[${sessionId}] Calling Claude API with ${req.files.length} file(s)...`);
-    // Stream the response — Sonnet 4.6 supports up to 64K output tokens, but the SDK
-    // requires streaming at that size to avoid HTTP timeouts on long generations.
-    // 64K is the model's output ceiling; a big report can exceed it. When that
-    // happens, feed the partial text back as an assistant prefill so the model
-    // continues exactly where it stopped, and stitch the rounds together.
-    const baseMessages = [{ role: 'user', content: userContentBlocks }];
-    const MAX_CONTINUATIONS = 3;
-    let responseText = '';
-    let stopReason = null;
-    for (let round = 0; round <= MAX_CONTINUATIONS; round++) {
-      // The API rejects assistant prefill ending in whitespace — trim before resuming.
-      responseText = responseText.replace(/\s+$/, '');
-      const messages = responseText
-        ? [...baseMessages, { role: 'assistant', content: responseText }]
-        : baseMessages;
-      const stream = anthropic.messages.stream({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 64000,
-        system: SYSTEM_PROMPT,
-        messages,
-      });
-      const response = await stream.finalMessage();
-      const textBlock = response.content.find((b) => b.type === 'text');
-      responseText += textBlock ? textBlock.text : '';
-      stopReason = response.stop_reason;
-      console.log(`[${sessionId}] Claude round ${round + 1}: ${Math.round(responseText.length / 1000)}k chars total, stop_reason=${stopReason}`);
-      if (stopReason !== 'max_tokens') break;
-      console.warn(`[${sessionId}] Hit max_tokens — requesting continuation ${round + 1}/${MAX_CONTINUATIONS}...`);
-    }
+    const responseText = await callClaude(userContentBlocks, sessionId);
 
     // Keep the raw response on disk so a bad parse is always diagnosable.
     const outputDir = path.join(__dirname, 'outputs', sessionId);
@@ -766,25 +1039,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
 
     // Parse JSON block — tolerate a truncated response (missing closing tag,
     // cut-off JSON) by repairing the tail instead of discarding the analysis.
-    let violationsData = null;
-    const jsonMatch = responseText.match(/<VIOLATIONS_JSON>([\s\S]*?)<\/VIOLATIONS_JSON>/);
-    let jsonText = jsonMatch ? jsonMatch[1] : null;
-    if (!jsonText) {
-      const openIdx = responseText.indexOf('<VIOLATIONS_JSON>');
-      if (openIdx !== -1) {
-        console.warn(`[${sessionId}] Closing tag missing — attempting truncated-JSON salvage.`);
-        jsonText = responseText.slice(openIdx + '<VIOLATIONS_JSON>'.length);
-      }
-    }
-    if (jsonText) {
-      try {
-        violationsData = JSON.parse(jsonText.trim());
-      } catch (e) {
-        violationsData = repairTruncatedJson(jsonText);
-        if (violationsData) console.warn(`[${sessionId}] Recovered analysis via truncation repair.`);
-        else console.warn(`[${sessionId}] JSON parse failed even after repair:`, e.message);
-      }
-    }
+    let violationsData = extractTaggedJson(responseText, 'VIOLATIONS_JSON', sessionId);
 
     if (!violationsData) {
       console.error(`[${sessionId}] No VIOLATIONS_JSON found in response. First 500 chars:`, responseText.substring(0, 500));

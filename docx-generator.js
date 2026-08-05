@@ -604,6 +604,87 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
   fs.writeFileSync(outputPath, buffer);
 }
 
+// ─── RESULTS DIFF REPORT (after response intake) ─────────────────────────────
+
+async function generateResultsDiffDocx(diff, outputPath) {
+  const children = [
+    makeBanner('RESULTS OF INVESTIGATION — ITEM-BY-ITEM DIFF'),
+    blank(),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: `Round ${diff.roundNumber}   |   Results received: ${diff.resultsDate || '[date]'}`, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    makeHRule(),
+  ];
+
+  const sections = [
+    ['FIXED', diff.groups.fixed, 'The bureau corrected these. Verify each on the fresh report, then leave them alone.'],
+    ['DELETED', diff.groups.deleted, 'These tradelines are gone. Best possible outcome — confirm they stay gone (watch for reinsertion).'],
+    ['VERIFIED WITHOUT CORRECTION', diff.groups.verified_unchanged, 'The bureau claims it verified these, but the defects are unchanged. THIS is the litigation core — each one is a reinvestigation that failed.'],
+    ['UNCLEAR', diff.groups.unclear, 'The documents do not clearly show the outcome. Review these by hand and classify them yourself in the round view.'],
+  ];
+
+  for (const [title, rows, note] of sections) {
+    if (!rows || rows.length === 0) continue;
+    children.push(makeSubHeading(`${title} (${rows.length})`));
+    children.push(makeBody(note, { italic: true }));
+    children.push(makeSimpleTable(
+      ['#', 'Account', 'Item', 'Before', 'After / evidence'],
+      rows.map(r => [String(r.item), r.account || r.furnisher || '', r.title || '',
+        r.before || '', [r.newValue, r.evidenceQuote ? `"${r.evidenceQuote}"` : ''].filter(Boolean).join(' — ')])
+    ));
+    children.push(blank());
+  }
+
+  const doc = makeDoc(children);
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+}
+
+// ─── METHOD-OF-VERIFICATION REQUEST (optional supporting exhibit) ─────────────
+//
+// Watts doctrine: never the case itself — a supporting exhibit. The bureau's
+// three-sentence boilerplate answer becomes evidence of how thin the
+// "investigation" was.
+
+async function generateMovLetterDocx(consumer, clientIdentity = {}, verifiedItems = [], outputPath) {
+  const cra = getCRA(consumer.bureau);
+  const phone = idVal(clientIdentity.phone, 18);
+
+  const children = [
+    makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
+    blank(),
+    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    blank(),
+    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    makeBody(cra.dept),
+    makeBody(cra.addr),
+    makeBody(cra.city),
+    blank(),
+    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
+    makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
+    makeLabelValue('Phone:', phone),
+    blank(),
+    makeBody('RE: How did you verify these items?', { bold: true }),
+    makeHRule(),
+    makeBody('To whom it may concern:'),
+    makeBody('You recently sent me the results of an investigation into items I disputed, and you said the following items were verified as accurate. For each one, please describe how you verified it: what you reviewed, who you contacted, and what documents you looked at.'),
+  ];
+
+  verifiedItems.forEach((it, i) => {
+    children.push(makeBody(`${i + 1}.  ${it.account ? it.account + ' — ' : ''}${it.title || ''}`, { indent: true }));
+  });
+
+  children.push(makeBody('Please send me your description in writing at my address above. Thank you.'));
+  children.push(blank(120));
+  children.push(makeBody('Sincerely,'));
+  children.push(blank(200));
+  children.push(makeBody('_________________________________'));
+  children.push(makeBody(consumer.name || '[Consumer Name]', { bold: true }));
+  children.push(makeBody(consumer.address || '[Consumer Address]'));
+
+  const doc = makeDoc(children);
+  const buffer = await Packer.toBuffer(doc);
+  fs.writeFileSync(outputPath, buffer);
+}
+
 // ─── MARKUP MAP ───────────────────────────────────────────────────────────────
 
 async function generateMarkupMapDocx(violationsData, outputPath) {
@@ -671,4 +752,6 @@ module.exports = {
   generateFileDisclosureDocx,
   generateMailingInstructionsDocx,
   generateMarkupMapDocx,
+  generateResultsDiffDocx,
+  generateMovLetterDocx,
 };
