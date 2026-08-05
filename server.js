@@ -247,13 +247,24 @@ app.post('/api/campaigns/:id/events', requirePin, (req, res) => {
 app.patch('/api/rounds/:id', requirePin, (req, res) => {
   const round = store.updateRound(Number(req.params.id), req.body || {}, (req.body || {}).evidence_path);
   if (!round) return res.status(404).json({ error: 'Round not found.' });
-  // Mailing a round marks its open items as sent; rounds 2/3 also re-send the
-  // items the bureau previously verified without fixing.
+  // Mailing a round marks its open items as sent — but only items on accounts
+  // the consumer actually approved into the letter (account_decisions); items
+  // gated out stay open. Rounds 2/3 also re-send the items the bureau
+  // previously verified without fixing.
   if ((req.body || {}).mail_date && round.run_id) {
-    store.setItemsStatusByRun(round.run_id, 'open', `round${round.round_number}_sent`, round.round_number);
+    const sent = `round${round.round_number}_sent`;
+    const included = store.getDecisions(round.campaign_id).filter(d => d.include_in_letter);
+    if (included.length > 0) {
+      const stmt = store.db.prepare(`UPDATE violation_items SET status=?, status_round=?
+        WHERE run_id=? AND status='open' AND furnisher_name=? AND (account_name=? OR account_name IS NULL)`);
+      for (const d of included) stmt.run(sent, round.round_number, round.run_id, d.furnisher_name, d.account_name);
+    } else {
+      // No recorded gate decisions (quick/legacy flow) — treat all as sent.
+      store.setItemsStatusByRun(round.run_id, 'open', sent, round.round_number);
+    }
     if (round.round_number >= 2) {
       store.db.prepare(`UPDATE violation_items SET status=?, status_round=? WHERE campaign_id=? AND status='verified_unchanged'`)
-        .run(`round${round.round_number}_sent`, round.round_number, round.campaign_id);
+        .run(sent, round.round_number, round.campaign_id);
     }
   }
   res.json(round);
