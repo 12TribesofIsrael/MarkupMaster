@@ -3,19 +3,45 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const Anthropic = require('@anthropic-ai/sdk');
 const archiver = require('archiver');
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
+const cookieParser = require('cookie-parser');
 const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx } = require('./docx-generator');
 const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
+const store = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 // ─── Serve static frontend ───────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json({ limit: '2mb' }));
+app.use(cookieParser());
+
+// ─── PIN gate ─────────────────────────────────────────────────────────────────
+// Everything except the static shell and /login requires the PIN cookie when
+// APP_PIN is set. Reports, letters, and the DB hold consumer PII.
+const APP_PIN = process.env.APP_PIN || '';
+const pinToken = APP_PIN ? crypto.createHmac('sha256', APP_PIN).update('markupmaster-auth').digest('hex') : null;
+
+app.post('/login', (req, res) => {
+  if (!APP_PIN) return res.json({ ok: true, pinless: true });
+  if (String((req.body || {}).pin) === APP_PIN) {
+    res.cookie('mm_auth', pinToken, { httpOnly: true, sameSite: 'strict' });
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ error: 'Wrong PIN.' });
+});
+
+function requirePin(req, res, next) {
+  if (!APP_PIN) return next();
+  if (req.cookies && req.cookies.mm_auth === pinToken) return next();
+  res.status(401).json({ error: 'PIN required. POST /login with {"pin": "..."}.' });
+}
 
 // ─── Multer setup ─────────────────────────────────────────────────────────────
 const storage = multer.diskStorage({
@@ -123,8 +149,72 @@ function repairTruncatedJson(text) {
   return null;
 }
 
+// ─── Campaign / client REST API ──────────────────────────────────────────────
+
+app.get('/api/clients', requirePin, (req, res) => res.json(store.listClients()));
+app.post('/api/clients', requirePin, (req, res) => {
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Client name is required.' });
+  res.json(store.createClient(b));
+});
+app.patch('/api/clients/:id', requirePin, (req, res) => {
+  const c = store.updateClient(Number(req.params.id), req.body || {});
+  if (!c) return res.status(404).json({ error: 'Client not found.' });
+  res.json(c);
+});
+
+app.get('/api/campaigns', requirePin, (req, res) => res.json(store.listCampaigns()));
+app.post('/api/campaigns', requirePin, (req, res) => {
+  const { client_id, bureau } = req.body || {};
+  if (!store.getClient(Number(client_id))) return res.status(400).json({ error: 'Unknown client_id.' });
+  if (!['Experian', 'Equifax', 'TransUnion'].includes(bureau)) return res.status(400).json({ error: 'bureau must be Experian, Equifax, or TransUnion.' });
+  res.json(store.createCampaign({ client_id: Number(client_id), bureau }));
+});
+app.get('/api/campaigns/:id', requirePin, (req, res) => {
+  const dash = store.campaignDashboard(Number(req.params.id));
+  if (!dash) return res.status(404).json({ error: 'Campaign not found.' });
+  res.json(dash);
+});
+app.delete('/api/campaigns/:id', requirePin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!store.getCampaign(id)) return res.status(404).json({ error: 'Campaign not found.' });
+  const uuids = store.deleteCampaign(id);
+  for (const u of uuids) fs.rmSync(path.join(__dirname, 'outputs', path.basename(u)), { recursive: true, force: true });
+  fs.rmSync(path.join(store.DATA_DIR, 'files', String(id)), { recursive: true, force: true });
+  res.json({ ok: true, removedRuns: uuids.length });
+});
+
+app.post('/api/campaigns/:id/events', requirePin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!store.getCampaign(id)) return res.status(404).json({ error: 'Campaign not found.' });
+  const { type, event_date, details, round_id, evidence_path } = req.body || {};
+  if (!type || !event_date) return res.status(400).json({ error: 'type and event_date are required.' });
+  res.json(store.addEvent({ campaign_id: id, round_id, type, event_date, details, evidence_path }));
+});
+
+app.patch('/api/rounds/:id', requirePin, (req, res) => {
+  const round = store.updateRound(Number(req.params.id), req.body || {}, (req.body || {}).evidence_path);
+  if (!round) return res.status(404).json({ error: 'Round not found.' });
+  // Mailing a round marks its open items as sent.
+  if ((req.body || {}).mail_date && round.run_id) {
+    store.setItemsStatusByRun(round.run_id, 'open', `round${round.round_number}_sent`, round.round_number);
+  }
+  res.json(round);
+});
+
+app.post('/api/campaigns/:id/decisions', requirePin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!store.getCampaign(id)) return res.status(404).json({ error: 'Campaign not found.' });
+  const decisions = Array.isArray(req.body) ? req.body : [req.body];
+  for (const d of decisions) {
+    if (!d.furnisher_name || !d.account_name) return res.status(400).json({ error: 'furnisher_name and account_name required.' });
+    store.upsertDecision({ ...d, campaign_id: id });
+  }
+  res.json(store.getDecisions(id));
+});
+
 // ─── POST /analyze ────────────────────────────────────────────────────────────
-app.post('/analyze', (req, res, next) => {
+app.post('/analyze', requirePin, (req, res, next) => {
   req.sessionId = uuidv4();
   next();
 }, upload.array('files', 10), async (req, res) => {
@@ -824,11 +914,42 @@ If the uploads include the report's first/header pages, read the consumer name, 
     const zipPath = path.join(outputDir, 'BMB_Dispute_Package.zip');
     await zipFiles(generatedFiles.map(f => f.path), zipPath, outputDir);
 
+    // Campaign persistence — when the run belongs to a campaign, store the
+    // report files, the run, every violation item, and open the next round.
+    const campaignId = Number(req.body.campaignId) || null;
+    let roundInfo = null;
+    if (campaignId && store.getCampaign(campaignId)) {
+      const destDir = path.join(store.DATA_DIR, 'files', String(campaignId), sessionId);
+      fs.mkdirSync(destDir, { recursive: true });
+      const stored = [];
+      for (const file of req.files) {
+        const dest = path.join(destDir, path.basename(file.originalname));
+        fs.copyFileSync(file.path, dest);
+        stored.push(dest);
+      }
+      const reportId = store.createReport({ campaign_id: campaignId, kind: 'initial_report', file_paths: stored, report_date: violationsData.consumer.reportDate });
+      const runId = store.createRun({ campaign_id: campaignId, report_id: reportId, session_uuid: sessionId, purpose: 'round1_analysis' });
+      store.insertViolationItems(campaignId, runId, violationsData);
+      const maxRound = store.db.prepare('SELECT MAX(round_number) m FROM rounds WHERE campaign_id=?').get(campaignId).m || 0;
+      try {
+        roundInfo = store.createRound({ campaign_id: campaignId, round_number: Math.min(maxRound + 1, 3), run_id: runId });
+      } catch (e) {
+        console.warn(`[${sessionId}] Round already exists for campaign ${campaignId}:`, e.message);
+      }
+      store.addEvent({
+        campaign_id: campaignId, round_id: roundInfo ? roundInfo.id : null,
+        type: 'analysis_run', event_date: new Date(),
+        details: { sessionId, summary: violationsData.summary },
+      });
+    }
+
     // Cleanup uploads
     fs.rmSync(path.join(__dirname, 'uploads', sessionId), { recursive: true, force: true });
 
     res.json({
       sessionId,
+      campaignId,
+      round: roundInfo,
       violations: violationsData.summary,
       furnishers: (violationsData.furnishers || []).map(f => ({
         name: f.name,
@@ -847,7 +968,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
 });
 
 // ─── GET /download/:sessionId/:filename ───────────────────────────────────────
-app.get('/download/:sessionId/:filename', (req, res) => {
+app.get('/download/:sessionId/:filename', requirePin, (req, res) => {
   const { sessionId, filename } = req.params;
   // Sanitize to prevent path traversal
   const safeName = path.basename(filename);
@@ -979,8 +1100,10 @@ function pruneOldOutputs() {
   const outputsDir = path.join(__dirname, 'outputs');
   if (!fs.existsSync(outputsDir)) return;
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const keep = new Set(store.listRunUuids());   // campaign-linked runs are kept
   let pruned = 0;
   for (const entry of fs.readdirSync(outputsDir)) {
+    if (keep.has(entry)) continue;
     const dir = path.join(outputsDir, entry);
     try {
       const stat = fs.statSync(dir);
@@ -990,7 +1113,7 @@ function pruneOldOutputs() {
       }
     } catch { /* concurrent removal — ignore */ }
   }
-  if (pruned > 0) console.log(`Pruned ${pruned} output session(s) older than ${retentionDays} days`);
+  if (pruned > 0) console.log(`Pruned ${pruned} orphan output session(s) older than ${retentionDays} days`);
 }
 
 // ─── Start server ─────────────────────────────────────────────────────────────
