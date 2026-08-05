@@ -313,6 +313,9 @@ async function generateLitigationMemoDocx(violationsData, memoContext = {}, outp
   const furnishers = (violationsData && violationsData.furnishers) || [];
   const events = memoContext.events || [];
   const solDeadline = memoContext.solDeadline || null;
+  // Map "furnisher||account||title" → lifecycle status (from violation_items).
+  const itemStatuses = memoContext.itemStatuses || {};
+  const statusOf = (f, v) => itemStatuses[`${f.name}||${v.accountName || ''}||${v.title || ''}`] || null;
 
   const children = [
     makeBanner('INTERNAL LITIGATION MEMO — DO NOT MAIL'),
@@ -333,22 +336,33 @@ async function generateLitigationMemoDocx(violationsData, memoContext = {}, outp
   children.push(makeSectionHeading('II', 'VIOLATION-TO-STATUTE MAP'));
   children.push(makeBody('Item numbers match the mailed dispute letter and the Markup Map. Every item, once disputed to the CRA and verified without correction, supports the §1681i claim against the CRA and the §1681s-2(b) claim against the furnisher; the statute column lists the additional specific hooks.'));
 
+  const hasStatuses = Object.keys(itemStatuses).length > 0;
   const rows = [];
   let itemNo = 0;
   for (const f of furnishers) {
     for (const v of (f.violations || [])) {
       itemNo++;
-      rows.push([
+      const row = [
         String(itemNo),
         v.accountName || f.name,
         v.title || '',
         v.severity || '',
         statuteTags(v, f).join('; '),
         `${v.remedyType || 'correct'} — ${v.remedyWording || v.demand || ''}`,
-      ]);
+      ];
+      if (hasStatuses) row.push((statusOf(f, v) || 'open').replace(/_/g, ' '));
+      rows.push(row);
     }
   }
-  children.push(makeSimpleTable(['#', 'Account', 'Violation', 'Severity', 'Statutory hooks', 'Remedy sought'], rows));
+  const headers = ['#', 'Account', 'Violation', 'Severity', 'Statutory hooks', 'Remedy sought'];
+  if (hasStatuses) headers.push('Status');
+  children.push(makeSimpleTable(headers, rows));
+  if (hasStatuses) {
+    const verifiedCount = Object.values(itemStatuses).filter(s => s === 'verified_unchanged' || s === 'escalated').length;
+    if (verifiedCount > 0) {
+      children.push(makeBody(`${verifiedCount} item(s) were VERIFIED WITHOUT CORRECTION after a documented certified-mail dispute — each is a completed reinvestigation failure and the core of the §1681i / §1681s-2(b) counts.`, { bold: true }));
+    }
+  }
   children.push(blank());
 
   children.push(makeSectionHeading('III', 'CLAIM THEORIES'));
@@ -404,6 +418,7 @@ async function generateLitigationMemoDocx(violationsData, memoContext = {}, outp
           item: n, furnisher: f.name, account: v.accountName || null, title: v.title || null,
           severity: v.severity || null, statutes: tags, remedyType: v.remedyType || null,
           remedyWording: v.remedyWording || null, precedent: v.precedent || null,
+          status: statusOf(f, v),
         });
         for (const t of tags) {
           const key = t.replace('§', '');

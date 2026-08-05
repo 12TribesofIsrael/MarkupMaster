@@ -4,110 +4,81 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **BMB Ultimate Dispute Letter Generator** — a local Node.js web application that:
-1. Accepts uploaded credit report images (JPG/PNG/PDF)
-2. Sends them to the Anthropic API (`claude-sonnet-4-6`) with all BMB knowledge files as system context
-3. Parses the AI response to extract violations organized by furnisher
-4. Generates a complete dispute package: `.docx` letters (one per furnisher) + HTML violation report + ZIP download
+**Markup Mastery** — a local Node.js web app that runs FCRA dispute **campaigns** end to end,
+following the dispute doctrine of consumer attorney John G. Watts (doctrine source: the RAG
+corpus in `c:\Users\Claude\Litigation`):
 
-## Target File Structure
+1. Upload credit report pages (JPG/PNG/PDF) → Claude (`claude-sonnet-4-6`) runs the 33-point
+   Metro 2® audit with the `docs/` knowledge base as system context
+2. The consumer reviews per-account **gates** (actually-wrong + thrilled-if-deleted), edits
+   wording, and approves — only then are final letters generated
+3. Mail dates / tracking / delivery are captured; the 30-day §1681i clock is tracked
+4. When results arrive, **response intake** diffs every item (fixed / deleted /
+   verified-unchanged / unclear), drafts a FINAL NOTICE round 2/3 from the verified items,
+   and maintains the willfulness chronology for litigation
+
+## The Watts letter doctrine (why the letters look the way they do)
+
+- The **mailed** dispute letter is plain English: no statute citations, no case names, no
+  Metro 2 — a specific factual error + exact remedy per item, ID + address proof enclosed,
+  circled report pages enclosed, full copy cc'd to every furnisher, and a demand for a
+  written explanation (the willfulness scaffold). Legalistic template letters get treated
+  as credit-repair spam and dismissed by judges as "worthless letters."
+- All statutes/case law live in the **internal** `Litigation_Memo.docx` (+
+  `litigation_memo.json`, keyed to `docs/BMB_Federal_Complaint_Template_NEW.md` counts).
+- The §1681g letter is a plain-language full-file request (Kelly v. RealPage, 3d Cir.).
+- NEVER reintroduce: minimum violation quotas in the prompt, statutes in mailed letter text,
+  blanket "delete this entire account" remedies for field-level errors, or a 609-letter/
+  magic-letter framing.
+
+## File Structure
 
 ```
-bmb-webapp/
-  server.js          <- Express server, Anthropic API calls, docx generation, zip
-  public/
-    index.html       <- Single-page app (dark-themed dashboard)
-    style.css
-    app.js
-  knowledge/         <- All BMB project knowledge files loaded into system prompt
-  uploads/           <- Temp storage for uploaded images (multer)
-  outputs/           <- Generated files per session
-  package.json
-  .env               <- ANTHROPIC_API_KEY (never commit)
+server.js            Express app: PIN gate, campaign REST API, /analyze, intake, generate
+db.js                better-sqlite3 store: clients, campaigns, reports, runs, rounds,
+                     account_decisions, violation_items, events (the chronology)
+docx-generator.js    All document generators (Watts letter, memo, 1681g, mailing, markup
+                     map, results diff, MOV request)
+cra-addresses.js     Single source of truth for CRA dispute addresses
+pdf-annotator.js     Red-box annotation of the report copy (text layer / OCR / model bbox)
+ocr_words.py         pytesseract word-box helper (needs python + tesseract on PATH)
+public/              Vanilla-JS SPA: js/api.js, js/router.js, js/views/{clients,campaign,
+                     round,intake,chronology}.js — hash-routed, no build step
+docs/                Knowledge base loaded into the system prompt (40k chars/file cap)
+data/                SQLite DB + campaign files (gitignored — holds PII)
+outputs/<uuid>/      Per-run generated documents (gitignored — holds PII)
 ```
 
 ## Commands
 
 ```bash
-node server.js          # Start app on port 3000
-npm install             # Install dependencies
+npm install
+node server.js          # http://localhost:4000  (binds 127.0.0.1 only)
 ```
 
-## Key Dependencies
+`.env`: `ANTHROPIC_API_KEY` (required), `PORT` (default 4000), `APP_PIN` (optional but
+recommended — gates /analyze, /api, /download), `OUTPUT_RETENTION_DAYS` (default 30,
+orphan-session pruning; campaign-linked runs are kept).
 
-| Package | Purpose |
-|---------|---------|
-| `express` | HTTP server |
-| `multer` | File upload handling |
-| `docx` | Word document generation |
-| `archiver` | ZIP file creation |
-| `@anthropic-ai/sdk` | Anthropic API calls |
-| `dotenv` | Environment variable loading |
+## Output set per approved round
 
-## Architecture
+`Dispute_Letter.docx` (the only mailed dispute instrument) · `Litigation_Memo.docx` + `.json`
+(internal, never mailed) · `Markup_Map.docx` · `Full_File_Request.docx` (round 1, separate
+envelope) · `Mailing_Instructions.docx` · `Violation_Report.html` · original + annotated
+report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
+`MOV_Request.docx` (supporting exhibit only).
 
-### Backend (`server.js`)
-- Loads all files in `knowledge/` as concatenated system prompt text
-- Accepts uploaded images (base64-encoded) in user message
-- Calls `claude-sonnet-4-6` with the BMB Power Prompt from `BMB_Generator_-_Operating_Protocolv2_1.txt`
-- Parses structured violation data from Claude's response (organized by furnisher)
-- Feeds parsed data into `docx` generators to produce per-furnisher letters
-- ZIPs all outputs and serves as single download
+## Key invariants
 
-### Dispute Package Output (per session)
-- One `.docx` CRA dispute letter per furnisher (covering all that furnisher's accounts)
-- One `.docx` furnisher demand letter per furnisher (§1681s-2(b))
-- One PDF Highlighting Guide
-- One HTML annotated violation report (color-coded: RED/YELLOW/ORANGE/PURPLE/BLUE/GREEN)
-- One complete Mailing Instructions document
-- All files bundled into one `.zip`
-
-### Letter Organization Rule
-Letters are organized **by furnisher, not by account**. If a furnisher has 3 accounts, all 3 go into ONE letter. Total packages = number of unique furnishers.
-
-### DOCX Letter Format (mandatory structure)
-1. VIA CERTIFIED MAIL header block
-2. CRA address
-3. RE line with statute citations
-4. CC block (furnisher address + tracking number blank) — **CRITICAL, never omit**
-5. Consumer info block
-6. Numbered violations with statute citations (sequential across all accounts per furnisher)
-7. 8 statutory demands (A–H)
-8. Compliance timeline (30 days)
-9. Certification and signature block
-
-## Knowledge Files (loaded as system context)
-
-| File | Role |
-|------|------|
-| `BMB_Generator_-_Operating_Protocolv2_1.txt` | Master operating protocol — governs entire analysis |
-| `BMB_6-Letter_Furnisher_Dispute_Package_Template.md` | Primary letter structure template |
-| `BMB_MANDATORY_VIOLATION_ANALYSIS_PROTOCOL.md` | 6-phase analysis protocol (must complete before letter generation) |
-| `BMB_RED_FLAG_QUICK_REFERENCE_CHECKLIST.md` | 12-section per-account violation checklist (Sections A–L) |
-| `BMB_DISPUTE_GENERATION_PROCESS_FLOWCHART.md` | Enforced step sequence |
-| `Metro_2__Field_Violation_Catcher__Comprehensive_Reference.md` | 33-point charge-off audit |
-| `FCRA_-_Fair_Credit_Reporting_Act.pdf` | Primary statute (§1681i, §1681e, §1681g, §1681s-2, §1681c, §1681n, §1681o) |
-| `FDCPA_-_Fair_Debt_Collection_Practices_Act.pdf` | Used for collection accounts (§1692g, §1692e, §1692f) |
-| `Metro_2_Credit_Reporting_Guide.pdf` | Technical field standards (Fields 11-26, FAQ 31-36) |
-| `The_credit_manifesto_.pdf` | Furnisher duties, 33-point charge-off review |
-| `Universal_Mailing_Instructions___Timeline_Template.md` | 30-day timeline and certified mail procedures |
-| `Statute_of_Limitations_by_State__Enforcement_Guide.md` | State SOL reference for litigation |
-| `FCRA_Damage_Calculator___1681n____1681o_SaaS_Foundation_.html` | Statutory damage calculator |
-| `BMB_Federal_Complaint_Template_NEW.docx` | Escalation: litigation-grade federal complaint |
-| `Universal_CRA_Dispute_Letter_Template__Per_Furnisher_.md` | CRA letter template |
-
-## Key Legal Citations Used in Letters
-
-- **Gillespie v. Equifax** — truncated account numbers (§1681g(a)(1))
-- **Seamans v. Temple University** — improper delinquency sequencing (§1681e(b))
-- **Cushman v. TransUnion** — CRA must conduct independent investigation (§1681i)
-- **Bradshaw v. BAC Home Loans** — boilerplate e-OSCAR responses insufficient (§1681i)
-
-## UI Requirements
-
-- Dark navy header, white cards
-- Step indicator: Upload → Analyzing → Generating → Download
-- Progress bar during API call
-- Violation summary cards (total, critical, high, medium) before download
-- Download button for full ZIP + individual file links
-- Clear error states
+- Letters are organized by furnisher; item numbers are global across the letter and match
+  the Markup Map and `violation_items.item_number`.
+- Deterministic guards in `server.js` inject masked-account-number (Gillespie) and
+  missing-DOFD violations, then renumber — never remove the renumbering pass.
+- `violationsData` JSON schema is dictated in the `/analyze` prompt; per-violation fields
+  `remedyType`/`remedyWording`/`internalContradiction` and per-furnisher `isCollector`
+  are required by the generators.
+- Rounds are capped at 3. `verified_unchanged` → FINAL NOTICE round or escalation.
+- The `events` table is the willfulness chronology — every real-world act gets a row with
+  its real-world date; the memo pleads straight from it.
+- Human approval is mandatory: `POST /api/rounds/:id/generate` is the only path to final
+  letters (CRO-liability lesson — no unreviewed letters in the consumer's name).

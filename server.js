@@ -299,6 +299,16 @@ function runViolationsPath(run) {
   return path.join(__dirname, 'outputs', path.basename(run.session_uuid), 'violations_data.json');
 }
 
+// Everything the litigation memo needs from campaign tracking.
+function memoContextFor(campaignId) {
+  const campaign = store.getCampaign(campaignId);
+  const itemStatuses = {};
+  for (const i of store.getItems(campaignId)) {
+    itemStatuses[`${i.furnisher_name}||${i.account_name || ''}||${i.title || ''}`] = i.status;
+  }
+  return { events: store.getEvents(campaignId), solDeadline: campaign ? campaign.sol_deadline : null, itemStatuses };
+}
+
 app.get('/api/runs/:id/violations', requirePin, (req, res) => {
   const run = store.getRun(Number(req.params.id));
   if (!run) return res.status(404).json({ error: 'Run not found.' });
@@ -364,11 +374,10 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
     }
 
     const outputDir = path.join(__dirname, 'outputs', path.basename(run.session_uuid));
-    const events = store.getEvents(round.campaign_id);
     const options = { round: round.round_number, mailDate: mailDate || undefined, prior };
 
     await generateWattsLetterDocx(data, clientIdentity, options, path.join(outputDir, 'Dispute_Letter.docx'));
-    await generateLitigationMemoDocx(data, { events, solDeadline: campaign ? campaign.sol_deadline : null },
+    await generateLitigationMemoDocx(data, memoContextFor(round.campaign_id),
       path.join(outputDir, 'Litigation_Memo.docx'), path.join(outputDir, 'litigation_memo.json'));
     await generateMarkupMapDocx(data, path.join(outputDir, 'Markup_Map.docx'));
     if (round.round_number === 1) {
@@ -594,6 +603,13 @@ app.post('/api/campaigns/:id/intake', requirePin, (req, res, next) => {
       }
     }
 
+    // The memo tracks the campaign — regenerate it after every intake so the
+    // chronology, SOL, and per-item statuses are always current.
+    const priorOutputsDir = path.join(__dirname, 'outputs', path.basename(priorRun.session_uuid));
+    await generateLitigationMemoDocx(priorData, memoContextFor(campaignId),
+      path.join(priorOutputsDir, 'Litigation_Memo.docx'), path.join(priorOutputsDir, 'litigation_memo.json'));
+    files.push({ name: 'Litigation_Memo.docx', url: `/download/${priorRun.session_uuid}/Litigation_Memo.docx` });
+
     res.json({
       ok: true,
       diff,
@@ -636,7 +652,7 @@ app.post('/api/campaigns/:id/escalate', requirePin, async (req, res) => {
     if (run && fs.existsSync(runViolationsPath(run))) {
       const data = JSON.parse(fs.readFileSync(runViolationsPath(run), 'utf8'));
       const outputDir = path.join(__dirname, 'outputs', path.basename(run.session_uuid));
-      await generateLitigationMemoDocx(data, { events: store.getEvents(campaignId), solDeadline: campaign.sol_deadline },
+      await generateLitigationMemoDocx(data, memoContextFor(campaignId),
         path.join(outputDir, 'Litigation_Memo.docx'), path.join(outputDir, 'litigation_memo.json'));
       memoUrl = `/download/${run.session_uuid}/Litigation_Memo.docx`;
     }
