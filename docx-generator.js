@@ -171,7 +171,7 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
     new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: dateLine, bold: true, size: sz(FONT_BODY), font: FONT })] }),
     blank(),
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    makeBody(cra.dept),
+    ...(cra.dept ? [makeBody(cra.dept)] : []),
     makeBody(cra.addr),
     makeBody(cra.city),
     blank(),
@@ -466,7 +466,7 @@ async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputP
     new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
     blank(),
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    makeBody(cra.dept),
+    ...(cra.dept ? [makeBody(cra.dept)] : []),
     makeBody(cra.addr),
     makeBody(cra.city),
     blank(),
@@ -545,7 +545,7 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
   children.push(makeSectionHeading('II', 'ENVELOPE-BY-ENVELOPE ASSEMBLY'));
 
   children.push(makeSubHeading(`PACKAGE 1: ${cra.name} — THE DISPUTE`));
-  children.push(makeBody(`Address: ${cra.name}, ${cra.dept}, ${cra.addr}, ${cra.city}`));
+  children.push(makeBody(`Address: ${cra.name}, ${cra.dept ? cra.dept + ', ' : ''}${cra.addr}, ${cra.city}`));
   children.push(makeBody('☐  Signed dispute letter (date it the day you mail it)', { indent: true }));
   children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
   children.push(makeBody('☐  Proof of current address (utility bill or bank statement, dated within 60 days)', { indent: true }));
@@ -669,7 +669,7 @@ async function generateMovLetterDocx(consumer, clientIdentity = {}, verifiedItem
     new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
     blank(),
     new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    makeBody(cra.dept),
+    ...(cra.dept ? [makeBody(cra.dept)] : []),
     makeBody(cra.addr),
     makeBody(cra.city),
     blank(),
