@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BMB AI Automation — Markup Mastery Generator</title>
+  <title>BMB AI Automation — Markup Mastery</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,39 +13,19 @@
       <div class="logo">
         <img src="logo.png" alt="BMB AI Automations" class="logo-img">
         <div>
-          <div class="logo-title">Markup Mastery Generator</div>
-          <div class="logo-sub">BMB AI Automation — FCRA Dispute Package Builder</div>
+          <div class="logo-title">Markup Mastery</div>
+          <div class="logo-sub">BMB AI Automation — FCRA Dispute Campaign Manager</div>
         </div>
       </div>
-      <div class="header-badge">Powered by Claude AI</div>
+      <nav style="display:flex;gap:12px;align-items:center">
+        <a href="#/clients" class="btn-link" style="font-size:14px">Clients</a>
+        <a href="#/quick" class="btn-link" style="font-size:14px">Quick analysis</a>
+        <div class="header-badge">Powered by Claude AI</div>
+      </nav>
     </div>
   </header>
 
   <main class="main">
-
-    <!-- Step Indicator -->
-    <div class="steps" id="stepIndicator">
-      <div class="step active" id="step1">
-        <div class="step-num">1</div>
-        <div class="step-label">Upload</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step2">
-        <div class="step-num">2</div>
-        <div class="step-label">Analyzing</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step3">
-        <div class="step-num">3</div>
-        <div class="step-label">Generating</div>
-      </div>
-      <div class="step-line"></div>
-      <div class="step" id="step4">
-        <div class="step-num">4</div>
-        <div class="step-label">Download</div>
-      </div>
-    </div>
-
     <!-- Error Banner -->
     <div class="error-banner" id="errorBanner" style="display:none">
       <span class="error-icon">⚠</span>
@@ -53,110 +33,18 @@
       <button class="error-close" onclick="clearError()">✕</button>
     </div>
 
-    <!-- Upload Section -->
-    <div class="card" id="uploadSection">
-      <h2 class="card-title">Upload Credit Report</h2>
-      <p class="card-sub">Upload 1–10 images or PDF pages of your credit report. Claude will analyze all pages together.</p>
-
-      <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf" multiple hidden>
-        <div class="dropzone-icon">📄</div>
-        <div class="dropzone-text">Drag & drop credit report files here</div>
-        <div class="dropzone-sub">JPG, PNG, or PDF &bull; Up to 10 files &bull; 20MB each</div>
-        <button class="btn btn-outline" onclick="document.getElementById('fileInput').click()">Browse Files</button>
-      </div>
-
-      <div style="margin:16px 0">
-        <label for="bureauSelect" style="font-weight:600;font-size:14px;display:block;margin-bottom:6px">Credit Bureau (CRA)</label>
-        <select id="bureauSelect" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;background:#fff">
-          <option value="auto">Auto-detect from report (full reports only)</option>
-          <option value="equifax">Equifax</option>
-          <option value="experian">Experian</option>
-          <option value="transunion">TransUnion</option>
-        </select>
-        <div style="font-size:12px;color:#64748b;margin-top:4px">Snapshots of a single account usually don't show which bureau they came from — pick it here so the letters go to the right CRA.</div>
-      </div>
-
-      <div class="file-list" id="fileList" style="display:none">
-        <div class="file-list-header">
-          <span id="fileCount">0 files selected</span>
-          <button class="btn-link" onclick="clearFiles()">Clear all</button>
-        </div>
-        <div id="fileItems"></div>
-      </div>
-
-      <div style="margin:16px 0">
-        <label style="font-weight:600;font-size:14px;display:block;margin-bottom:6px">Your details (go on the letters — leave blank to fill in by hand)</label>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-          <input id="idPhone" type="tel" placeholder="Phone" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idPhone2" type="tel" placeholder="Second phone (optional)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idEmail" type="email" placeholder="Email" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idDob" type="text" placeholder="Date of birth (MM/DD/YYYY)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idSsn" type="text" placeholder="SSN (or last 4)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idFormerNames" type="text" placeholder="Former name(s) (optional)" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-          <input id="idProof" type="text" placeholder='Proof of address you will enclose (e.g. "Delmarva Power bill")' style="grid-column:1 / -1;padding:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px">
-        </div>
-        <div style="font-size:12px;color:#64748b;margin-top:4px">A full identity block blocks the bureaus' "we don't think this is really you" stall letter. These details stay on this computer.</div>
-      </div>
-
-      <button class="btn btn-primary" id="analyzeBtn" onclick="startAnalysis()" disabled>
-        Analyze Credit Report →
-      </button>
-    </div>
-
-    <!-- Progress Section -->
-    <div class="card" id="progressSection" style="display:none">
-      <h2 class="card-title" id="progressTitle">Analyzing Credit Report...</h2>
-      <p class="card-sub" id="progressSub">Claude is running the 33-point Metro 2® audit and identifying FCRA violations. This typically takes 60–90 seconds.</p>
-      <div class="progress-bar">
-        <div class="progress-fill" id="progressFill"></div>
-      </div>
-      <div class="progress-steps" id="progressSteps">
-        <div class="progress-step active" id="ps1">🔍 Scanning accounts...</div>
-        <div class="progress-step" id="ps2">⚖ Identifying violations...</div>
-        <div class="progress-step" id="ps3">📝 Generating letters...</div>
-        <div class="progress-step" id="ps4">📦 Building package...</div>
-      </div>
-    </div>
-
-    <!-- Results Section -->
-    <div class="card" id="resultsSection" style="display:none">
-      <h2 class="card-title">Analysis Complete</h2>
-      <p class="card-sub" id="consumerName"></p>
-
-      <!-- Summary Cards -->
-      <div class="summary-grid" id="summaryGrid"></div>
-
-      <!-- Furnisher List -->
-      <div id="furnisherList" style="margin:24px 0"></div>
-
-      <!-- Review gate: the letters are only final once the consumer has
-           personally reviewed and approved every disputed account -->
-      <div id="reviewGate" style="margin:24px 0;padding:16px;border:2px solid #f59e0b;border-radius:12px;background:#fffbeb">
-        <h3 style="font-size:15px;font-weight:700;margin-bottom:6px">Review before mailing — required</h3>
-        <p style="font-size:13px;color:#64748b;margin-bottom:12px">These letters go out in <strong>your</strong> name, so you must personally confirm each account. Two rules: only dispute information that is <strong>actually wrong</strong>, and only dispute an account if you'd be <strong>thrilled to see the whole account deleted</strong> — the bureau's options are always fix, delete, or nothing, and you don't control which. If an account fails either test, re-run the analysis without that account's pages, or strike its items from the letter before mailing.</p>
-        <div id="reviewItems"></div>
-      </div>
-
-      <!-- Download Area -->
-      <div class="download-area">
-        <a class="btn btn-primary btn-download" id="zipDownload" href="#" download>
-          ⬇ Download Full Dispute Package (.zip)
-        </a>
-        <div class="file-links" id="fileLinks"></div>
-      </div>
-
-      <button class="btn btn-outline" onclick="resetApp()" style="margin-top:16px;width:100%">
-        ← Start New Analysis
-      </button>
-    </div>
-
+    <div id="view"></div>
   </main>
 
   <footer class="footer">
-    <p>BMB AI Automation — Markup Mastery Generator &bull; All documents are for consumer self-help purposes &bull; Not legal advice</p>
+    <p>BMB AI Automation — Markup Mastery &bull; All documents are for consumer self-help purposes &bull; Not legal advice</p>
   </footer>
 
-  <script src="app.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/views/clients.js"></script>
+  <script src="js/views/campaign.js"></script>
+  <script src="js/views/round.js"></script>
+  <script src="js/views/chronology.js"></script>
+  <script src="js/router.js"></script>
 </body>
 </html>

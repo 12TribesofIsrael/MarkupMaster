@@ -213,6 +213,139 @@ app.post('/api/campaigns/:id/decisions', requirePin, (req, res) => {
   res.json(store.getDecisions(id));
 });
 
+// ─── Run violations: fetch / edit / regenerate ───────────────────────────────
+
+// Watts "should we dispute" warnings — accounts the consumer may not want to
+// poke. Computed per account; each warning must be acknowledged in the UI.
+function computeWarnings(violationsData) {
+  const out = [];
+  const num = s => parseFloat(String(s || '').replace(/[^0-9.]/g, '')) || 0;
+  for (const f of (violationsData.furnishers || [])) {
+    for (const a of (f.accounts || [])) {
+      const warnings = [];
+      const isCollection = f.isCollector === true
+        || /collection/i.test(String(a.accountType || '')) || /collection/i.test(String(a.status || ''));
+      if (isCollection && num(a.balance) > 0) {
+        warnings.push('Unpaid collection: disputing can put this debt back on the collector\'s radar. If your state\'s statute of limitations on the debt is still running, think hard before drawing attention — check your state\'s SOL first.');
+      }
+      const dofdYear = (String(a.dofd || '').match(/(19|20)\d{2}/) || [])[0];
+      if (dofdYear && (new Date().getFullYear() - Number(dofdYear)) >= 6) {
+        warnings.push('The first delinquency is over 6 years old — this item may age off your report on its own soon. Weigh whether disputing is worth waking it up.');
+      }
+      if (warnings.length > 0) out.push({ furnisher: f.name, account: a.accountName, warnings });
+    }
+  }
+  return out;
+}
+
+function runViolationsPath(run) {
+  return path.join(__dirname, 'outputs', path.basename(run.session_uuid), 'violations_data.json');
+}
+
+app.get('/api/runs/:id/violations', requirePin, (req, res) => {
+  const run = store.getRun(Number(req.params.id));
+  if (!run) return res.status(404).json({ error: 'Run not found.' });
+  const p = runViolationsPath(run);
+  if (!fs.existsSync(p)) return res.status(404).json({ error: 'Violations data missing for this run.' });
+  const violationsData = JSON.parse(fs.readFileSync(p, 'utf8'));
+  res.json({ run, violationsData, warnings: computeWarnings(violationsData) });
+});
+
+app.patch('/api/runs/:id/violations', requirePin, (req, res) => {
+  const run = store.getRun(Number(req.params.id));
+  if (!run) return res.status(404).json({ error: 'Run not found.' });
+  const data = (req.body || {}).violationsData;
+  if (!data || !Array.isArray(data.furnishers)) return res.status(400).json({ error: 'violationsData with furnishers[] required.' });
+  fs.writeFileSync(runViolationsPath(run), JSON.stringify(data, null, 2), 'utf8');
+  res.json({ ok: true });
+});
+
+// Approve a round: regenerate the final letter set from the (possibly edited)
+// violations JSON, restricted to the accounts the consumer approved, dated
+// with the real mail date. Letters are never final without this step.
+app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
+  try {
+    const round = store.getRound(Number(req.params.id));
+    if (!round) return res.status(404).json({ error: 'Round not found.' });
+    const run = store.getRun(round.run_id);
+    if (!run) return res.status(400).json({ error: 'Round has no analysis run.' });
+    const p = runViolationsPath(run);
+    if (!fs.existsSync(p)) return res.status(404).json({ error: 'Violations data missing for this run.' });
+
+    const full = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const { mailDate, includedAccounts } = req.body || {};
+
+    // Restrict to approved accounts when a selection is provided.
+    let data = full;
+    if (Array.isArray(includedAccounts)) {
+      const keep = new Set(includedAccounts.map(x => `${x.furnisher}||${x.account}`));
+      data = {
+        ...full,
+        furnishers: full.furnishers.map(f => ({
+          ...f,
+          accounts: (f.accounts || []).filter(a => keep.has(`${f.name}||${a.accountName}`)),
+          violations: (f.violations || []).filter(v => keep.has(`${f.name}||${v.accountName}`)),
+        })).filter(f => (f.violations || []).length > 0),
+      };
+      if (data.furnishers.length === 0) return res.status(400).json({ error: 'No accounts selected — nothing to generate.' });
+    }
+
+    const campaign = store.getCampaign(round.campaign_id);
+    const client = campaign ? store.getClient(campaign.client_id) : null;
+    const clientIdentity = client ? {
+      phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
+      dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
+      proofOfAddress: client.proof_of_address || '',
+    } : {};
+
+    // Round 2/3: recite the prior round's real dates and tracking.
+    let prior = {};
+    if (round.round_number >= 2) {
+      const prev = store.db.prepare('SELECT * FROM rounds WHERE campaign_id=? AND round_number=?')
+        .get(round.campaign_id, round.round_number - 1);
+      if (prev) prior = { mailDate: prev.mail_date, tracking: prev.tracking_cra, deliveredDate: prev.delivered_date };
+    }
+
+    const outputDir = path.join(__dirname, 'outputs', path.basename(run.session_uuid));
+    const events = store.getEvents(round.campaign_id);
+    const options = { round: round.round_number, mailDate: mailDate || undefined, prior };
+
+    await generateWattsLetterDocx(data, clientIdentity, options, path.join(outputDir, 'Dispute_Letter.docx'));
+    await generateLitigationMemoDocx(data, { events, solDeadline: campaign ? campaign.sol_deadline : null },
+      path.join(outputDir, 'Litigation_Memo.docx'), path.join(outputDir, 'litigation_memo.json'));
+    await generateMarkupMapDocx(data, path.join(outputDir, 'Markup_Map.docx'));
+    if (round.round_number === 1) {
+      await generateFileDisclosureDocx(data.consumer, clientIdentity, path.join(outputDir, 'Full_File_Request.docx'));
+    }
+    await generateMailingInstructionsDocx(data, path.join(outputDir, 'Mailing_Instructions.docx'));
+
+    // Rebuild the ZIP from everything in the session dir (except the zip itself).
+    const zipPath = path.join(outputDir, 'BMB_Dispute_Package.zip');
+    const all = fs.readdirSync(outputDir)
+      .filter(n => n !== 'BMB_Dispute_Package.zip' && n !== 'raw_response.txt')
+      .map(n => path.join(outputDir, n));
+    await zipFiles(all, zipPath, outputDir);
+
+    store.db.prepare('UPDATE rounds SET status=? WHERE id=?').run('approved', round.id);
+    store.addEvent({
+      campaign_id: round.campaign_id, round_id: round.id, type: 'letter_approved',
+      event_date: new Date().toISOString().slice(0, 10),
+      details: { round: round.round_number, accounts: includedAccounts || 'all' },
+    });
+
+    const names = ['Dispute_Letter.docx', 'Litigation_Memo.docx', 'Markup_Map.docx', 'Mailing_Instructions.docx', 'BMB_Dispute_Package.zip']
+      .concat(round.round_number === 1 ? ['Full_File_Request.docx'] : []);
+    res.json({
+      ok: true, round: store.getRound(round.id),
+      files: names.filter(n => fs.existsSync(path.join(outputDir, n)))
+        .map(n => ({ name: n, url: `/download/${run.session_uuid}/${n}` })),
+    });
+  } catch (err) {
+    console.error('generate failed:', err);
+    res.status(500).json({ error: err.message || 'Generation failed.' });
+  }
+});
+
 // ─── POST /analyze ────────────────────────────────────────────────────────────
 app.post('/analyze', requirePin, (req, res, next) => {
   req.sessionId = uuidv4();
