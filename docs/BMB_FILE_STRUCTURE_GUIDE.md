@@ -147,7 +147,7 @@
   - Violation-to-statute mapping
 - **Key Use:** Run through this checklist for EVERY account
 - **Example Violations:**
-  - Truncated account number = Cite *Gillespie v. Equifax*
+  - Truncated account number = Cite FCRA Â§1681g(a)(1) (NOT Gillespie — that is the date-of-last-activity case)
   - Payment history "ND" codes = Cite Metro 2Â® Field 18
   - Improper delinquency sequence = Cite *Seamans v. Temple University*
 

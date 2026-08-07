@@ -29,7 +29,7 @@
 
 **RED FLAG:** Truncated number (contains "X" or fewer digits than expected)
 
-**Violation Type:** FCRA §1681g(a)(1) - *Gillespie v. Equifax Info. Servs. LLC*
+**Violation Type:** FCRA §1681g(a)(1) (do NOT cite Gillespie here — Gillespie, 484 F.3d 938 (7th Cir. 2007), is the date-of-last-activity case)
 
 **Impact:** Consumer cannot verify account or obtain confirmation from creditor
 

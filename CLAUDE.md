@@ -72,8 +72,15 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
 
 - Letters are organized by furnisher; item numbers are global across the letter and match
   the Markup Map and `violation_items.item_number`.
-- Deterministic guards in `server.js` inject masked-account-number (Gillespie) and
-  missing-DOFD violations, then renumber — never remove the renumbering pass.
+- Deterministic guards in `server.js` inject masked-account-number (§1681g(a)(1)),
+  missing-DOFD, and blank-Date-of-Last-Activity violations, then renumber — never remove
+  the renumbering pass. The DOLA guard only fires when the uploaded PDF actually prints a
+  "Date of Last Activity" label (Equifax does, the others often don't), so it never boxes a
+  field that isn't there.
+- Date of Last Activity is **not** an FCRA-required field (Watts). Never plead a blank DOLA as
+  a mandatory-field omission and never cite a Metro 2 field number for it — it is a §1681g
+  clarity defect, and Gillespie v. Equifax, 484 F.3d 938 (7th Cir. 2007) is the DOLA case,
+  not the account-number case.
 - `violationsData` JSON schema is dictated in the `/analyze` prompt; per-violation fields
   `remedyType`/`remedyWording`/`internalContradiction` and per-furnisher `isCollector`
   are required by the generators.

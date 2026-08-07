@@ -84,7 +84,7 @@ For EVERY account, ask these questions:
 
 **TRUNCATION CHECK:**
 - Is account number truncated with X's or asterisks?
-- YES â†’ Violation: *Gillespie v. Equifax* CRITICAL
+- YES â†’ Violation: FCRA Â§1681g(a)(1) CRITICAL (do NOT cite Gillespie — that is the date-of-last-activity case)
 
 **DATE OPENED CHECK:**
 - Is date opened present and valid?

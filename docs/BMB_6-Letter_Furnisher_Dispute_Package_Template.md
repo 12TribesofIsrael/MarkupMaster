@@ -187,7 +187,7 @@ If accounts are deleted, do not re-report without written furnisher certificatio
 [INSERT RELEVANT PRECEDENTS WITH APPLICATION TO THIS FURNISHER'S VIOLATIONS]
 
 Examples:
-- **Gillespie v. Equifax** (truncated account numbers)
+- **Gillespie v. Equifax**, 484 F.3d 938 (7th Cir. 2007) (amended date of last activity → unclear §1681g disclosure)
 - **Seamans v. Temple University** (payment history gaps)
 - **Cushman v. TransUnion** (independent investigation required)
 - **Bradshaw v. BAC** (boilerplate responses insufficient)
@@ -285,7 +285,7 @@ For every account on the credit report:
 **A. TRUNCATED ACCOUNT NUMBERS**
 - Pattern: Account number showing X's or fewer digits than standard
 - Statute: FCRA Â§1681g(a)(1)
-- Precedent: *Gillespie v. Equifax*
+- Precedent: none (do NOT cite Gillespie — that is the date-of-last-activity case, 484 F.3d 938 (7th Cir. 2007))
 - Fix: Demand full account number or deletion
 
 **B. MISSING DATE OF FIRST DELINQUENCY (DOFD)**

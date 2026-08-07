@@ -12,7 +12,7 @@ Print this and go through it account by account. If you answer YES to any questi
 ### SECTION A: TRUNCATION & ACCOUNT NUMBER
 ```
 â–¡ Is the account number shown with X's or asterisks?              YES [ ] NO [ ]
-  If YES â†’ Violation: *Gillespie v. Equifax* - DEMAND full number or deletion
+  If YES â†’ Violation: FCRA Â§1681g(a)(1) - DEMAND full number or deletion (do NOT cite Gillespie — that is the date-of-last-activity case)
 
 â–¡ Is the account number fewer digits than expected?               YES [ ] NO [ ]
   If YES â†’ Violation: Incomplete account identification - DEMAND full number

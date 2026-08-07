@@ -77,11 +77,11 @@ SECTION 2: VIOLATION IDENTIFICATION PROTOCOL
 Analyze EVERY account on the credit report for these violations:
 
 ### A. TRUNCATED ACCOUNT NUMBERS
-**Legal Standard:** FCRA Ã‚Â§1681g(a)(1) - *Gillespie v. Equifax Info. Servs. LLC*
+**Legal Standard:** FCRA Ã‚Â§1681g(a)(1)  (do NOT cite Gillespie — that is the date-of-last-activity case, 484 F.3d 938 (7th Cir. 2007))
 **Identify:** Any account number with X's or fewer digits than expected
 **Example:** "601101XXXXXX" instead of full 16-digit number
 **Violation:** Consumer entitled to full account number for verification
-**Action:** Cite *Gillespie* precedent, demand full number or deletion
+**Action:** Demand full number or deletion (do NOT cite Gillespie — that is the date-of-last-activity case, 484 F.3d 938 (7th Cir. 2007))
 
 ### B. MISSING DATE OF FIRST DELINQUENCY (DOFD)
 **Legal Standard:** Metro 2Ã‚Â® Field 25 (mandatory for charge-offs, collections, delinquencies)
@@ -201,7 +201,7 @@ SECTION 3: DELIVERABLE GENERATION REQUIREMENTS
 **Statutory Citations:**
 - Include specific statute section (e.g., "FCRA Ã‚Â§1681g(a)(1)")
 - Include Metro 2Ã‚Â® field references (e.g., "Metro 2Ã‚Â® Field 25")
-- Include case law where applicable (e.g., "*Gillespie v. Equifax*")
+- Include case law where applicable (e.g., "*Gillespie v. Equifax*, 484 F.3d 938 (7th Cir. 2007)" — date of last activity only)
 
 **Tone:** Formal, legal, authoritative, litigation-ready
 
@@ -497,9 +497,11 @@ SECTION 7: LEGAL PRECEDENTS TO CITE
 ----------------------------------------
 
 **Gillespie v. Equifax Info. Servs. LLC**
-- Issue: Truncated account numbers
-- Holding: Violates FCRA Ã‚Â§1681g(a)(1) full file disclosure
-- Use for: All truncated account number violations
+- Cite: 484 F.3d 938 (7th Cir. 2007)
+- Issue: Date of last activity — the CRA amending that field
+- Holding: The practice can render the FCRA Ã‚Â§1681g file disclosure unclear
+- Use for: Date-of-last-activity violations ONLY. This is NOT a truncated-account-number
+  case — truncation is pled under FCRA Ã‚Â§1681g(a)(1) with no case citation.
 
 **Seamans v. Temple University**
 - Issue: Improper delinquency sequencing

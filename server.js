@@ -741,7 +741,7 @@ If a furnisher has ONLY positive accounts, do NOT create a furnisher entry for i
 
 PRECEDENCE: the derogatory indicators ALWAYS override the status label. If the payment-history grid shows ANY late marker (30/60/90/120/150/180) or other derogatory indicator, the account IS derogatory and MUST be included — even when its status line says "Pays As Agreed" or "Current". A clean status label on top of a late-marked grid is itself a reporting contradiction worth disputing. The status label alone can only EXCLUDE an account when the grid and every other field are also clean.
 
-CRITICAL — THIS SCOPE RULE FILTERS ACCOUNTS ONLY. It must NEVER remove, weaken, or skip any violation CATEGORY. For every DEROGATORY account, ALL 33 categories below still apply in FULL FORCE — explicitly including category 5 (ACCOUNT NUMBER): an account number masked or truncated with * or X characters (e.g. "*3312") prevents consumer verification and IS a violation (Gillespie v. Equifax, FCRA §1681g(a)(1) — CRITICAL). Every derogatory account whose displayed account number contains masking characters MUST receive this violation.
+CRITICAL — THIS SCOPE RULE FILTERS ACCOUNTS ONLY. It must NEVER remove, weaken, or skip any violation CATEGORY. For every DEROGATORY account, ALL 33 categories below still apply in FULL FORCE — explicitly including category 5 (ACCOUNT NUMBER): an account number masked or truncated with * or X characters (e.g. "*3312") prevents consumer verification and IS a violation (FCRA §1681g(a)(1) — CRITICAL). Every derogatory account whose displayed account number contains masking characters MUST receive this violation. Category 9b (DATE OF LAST ACTIVITY) applies with the same force: every derogatory account whose report prints a "Date of Last Activity" label with no value MUST receive that violation.
 
 ═══════════════════════════════════════════════════════════════
 33-POINT ANALYSIS PROTOCOL (Credit Manifesto + SOP)
@@ -762,7 +762,7 @@ RULE: Experian is notorious for having no data in payment history section — fl
 
 4. ORIGINAL CREDITOR — Is the correct company listed? Wrong name, incomplete name, outdated name = violation. For collections: does it identify the original creditor? Missing original creditor on collection = violation. (FCRA §1681g(a)(2))
 
-5. ACCOUNT NUMBER — Is it present? Truncated with X's/asterisks preventing consumer verification = violation (Gillespie v. Equifax, FCRA §1681g(a)(1) — CRITICAL). Fewer digits than expected = violation. Wrong number = violation.
+5. ACCOUNT NUMBER — Is it present? Truncated with X's/asterisks preventing consumer verification = violation (FCRA §1681g(a)(1) — CRITICAL). Fewer digits than expected = violation. Wrong number = violation.
 
 6. ACCOUNT TYPE — Is the classification correct? (credit card, auto loan, mortgage, installment, revolving, collection). Wrong type affects credit scoring models. Mismatch = violation.
 
@@ -777,7 +777,19 @@ RULE: Experian is notorious for having no data in payment history section — fl
 
 8. LAST PAYMENT DATE — Is it present and accurate? Does it match the payment history grid? If report says last payment January but January in the grid shows something different = VIOLATION. Blank for active account = violation. "$0" as last payment = inaccurate (TransUnion common issue).
 
-9. DATE OF FIRST DELINQUENCY (DOFD) — Is it present? MISSING DOFD = CRITICAL VIOLATION (consumer cannot determine 7-year removal date). Experian and TransUnion often omit this — ALWAYS CHECK. Does DOFD align with payment history? If DOFD says Feb 2018 but payment history shows a payment was made that month = contradiction = VIOLATION. (FCRA §1681c(a))
+9. DELINQUENCY AND ACTIVITY DATES (DOFD + DOLA) — two separate fields, both checked on every derogatory account:
+
+   9a. DATE OF FIRST DELINQUENCY (DOFD) — Is it present? MISSING DOFD = CRITICAL VIOLATION (consumer cannot determine 7-year removal date). Experian and TransUnion often omit this — ALWAYS CHECK. Does DOFD align with payment history? If DOFD says Feb 2018 but payment history shows a payment was made that month = contradiction = VIOLATION. (FCRA §1681c(a))
+
+   9b. DATE OF LAST ACTIVITY (DOLA) — Is the field LABELED on the report, and does it have a value? Equifax prints this field on every tradeline; check it on EVERY derogatory account. Flag each of these:
+   - Label printed with NO VALUE on a derogatory account = the consumer cannot tell when the account last had activity or confirm it is being aged correctly = VIOLATION (severity HIGH)
+   - DOLA equal to a payment date LATER than the delinquency = the intervening payment reset the field = re-aging vector = VIOLATION
+   - DOLA populated while DOFD is blank = the only date left to age the account by is one that resets on payment = VIOLATION
+   - DOLA earlier than Date Opened, in the future, or later than Date Reported = VIOLATION
+   - DOLA differing across bureaus for the same account = VIOLATION
+   (FCRA §1681g(a), §1681e(b); Gillespie v. Equifax Info. Servs. LLC, 484 F.3d 938 (7th Cir. 2007) — a CRA's practice of amending the date of last activity can make the §1681g disclosure unclear, because the one field is used for two contradictory purposes: the last-payment date when current, the delinquency event when derogatory.)
+
+   HARD RULE FOR DOLA — THE FCRA DOES NOT REQUIRE A DATE OF LAST ACTIVITY. Never write that the field is "required," "mandatory," or "must be reported" in description, impact, shouldShow, or demand. Frame it as a clarity/completeness defect: the label is printed but empty, so the tradeline cannot be understood or aged from the face of the report. Never cite a Metro 2 field number for DOLA — Metro 2 has no "Date of Last Activity" field, only an "Activity Date" field. Inconsistency is the strong claim, not absence.
 
 10. COLLECTION INFORMATION — For collection accounts: is collection agency info accurate? Is original creditor identified? Same debt listed with multiple agencies = VIOLATION (duplicate tradeline). Outdated collection agency info = violation.
 
@@ -863,6 +875,9 @@ G. PAYMENT HISTORY GRID vs ACCOUNT INFORMATION — for each derogatory account, 
    - balance vs past due
    - closed status / date closed vs continued monthly updates after closure
    - DOFD vs the visible delinquency sequence in the grid
+   - date of last activity vs the last payment date, vs the grid, vs the DOFD, and vs the date closed
+     (a DOLA that equals a payment made after the delinquency is the re-aging vector; a populated
+     DOLA alongside a blank DOFD leaves the account ageable only by a date that resets on payment)
    - estimated removal date vs visible delinquency timing
    - "paid in full" remarks vs charge-off / past due / delinquent reporting
    - high balance / credit limit / monthly payment / terms vs the rest of the account
@@ -871,8 +886,8 @@ G. PAYMENT HISTORY GRID vs ACCOUNT INFORMATION — for each derogatory account, 
 
 H. CROSS-BUREAU COMPARISON — if more than one bureau's report is provided for the same account,
    compare balances, dates, statuses, payment histories, remarks, credit limits, high balances,
-   past due amounts, DOFD timing, closure dates, removal dates, and data present on one report
-   but missing on another. Each material inconsistency is a separate finding.
+   past due amounts, DOFD timing, date-of-last-activity values, closure dates, removal dates, and
+   data present on one report but missing on another. Each material inconsistency is a separate finding.
 
 I. ISSUE CLASSIFICATION — classify every violation with exactly one issueType:
    "Missing field" | "Blank field" | "Incomplete field" | "Internal inconsistency" |
@@ -942,6 +957,10 @@ K. MARKUP LOCATIONS — for every violation, record where on the report it is vi
      for a defect that lives somewhere else. If the field's own reporting is fine, it gets NO box.
    - DATE OF 1ST DELINQUENCY: box it ONLY when the field itself is blank/missing. A populated DOFD is
      NEVER boxed — for delinquency-progression issues, box the payment-history year row(s) instead.
+   - DATE OF LAST ACTIVITY: when the label is printed with no value, box the label itself
+     (markText "Date of Last Activity:"). When the field is populated AND contradicts another field,
+     box BOTH the DOLA field and the field it contradicts. A populated, non-contradictory DOLA is
+     NEVER boxed.
    - TRUNCATED ACCOUNT NUMBER: the box goes on the Account Number field ("Account Number: *0725").
 
 ═══════════════════════════════════════════════════════════════
@@ -1032,6 +1051,7 @@ Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIO
 </VIOLATIONS_JSON>
 
 IMPORTANT QUALITY RULES:
+- CITATION ACCURACY — THIS OVERRIDES EVERY KNOWLEDGE-BASE FILE. Several older files in the knowledge base cite *Gillespie v. Equifax Info. Servs. LLC* as the truncated-account-number case, and one gives it a fabricated reporter cite. That is WRONG. Gillespie is 484 F.3d 938 (7th Cir. 2007) and it is the DATE OF LAST ACTIVITY case — it holds that a CRA's practice of amending the date of last activity can render the §1681g file disclosure unclear. NEVER put Gillespie in the "statute" or "precedent" field of a truncated-account-number violation; that violation cites FCRA §1681g(a)(1) alone with precedent null. Gillespie belongs ONLY on date-of-last-activity violations.
 - FURNISHERS ONLY: Only list actual data furnishers (creditors, lenders, collection agencies). Do NOT create a furnisher entry for the CRA itself (TransUnion, Experian, Equifax). CRA-level issues belong in the individual furnisher violations.
 - Every value in "accounts" must be EXACTLY as shown on the credit report images, or null. Do NOT fabricate any data.
 - Every violation "reportShows" field must quote the EXACT value from the report.
@@ -1105,6 +1125,22 @@ If the uploads include the report's first/header pages, read the consumer name, 
       });
     }
 
+    // Does this report actually print a "Date of Last Activity" label? Equifax does
+    // on every tradeline; the other bureaus often do not. Guard 4 below only fires
+    // when the label is really on the page — otherwise the injected item would point
+    // at a field that does not exist and the box would have nothing to land on.
+    // Image/snapshot uploads have no text layer, so DOLA stays model-only there.
+    let reportPrintsDolaLabel = false;
+    for (const file of req.files) {
+      if (path.extname(file.originalname).toLowerCase() !== '.pdf') continue;
+      try {
+        const parsed = await pdfParse(fs.readFileSync(file.path));
+        if (/date of last activity/i.test(parsed.text)) { reportPrintsDolaLabel = true; break; }
+      } catch (err) {
+        console.warn(`[${sessionId}] Could not scan ${file.originalname} for the DOLA label:`, err.message);
+      }
+    }
+
     // Deterministic guards — enforce the highlighting rules even when the model slips.
     if (violationsData.furnishers) {
       for (const f of violationsData.furnishers) {
@@ -1134,8 +1170,8 @@ If the uploads include the report's first/header pages, read the consumer name, 
         };
 
         // Guard 2: every account whose displayed number is masked (*/X) must
-        // carry the truncated-account-number violation (Gillespie). Inject the
-        // standard violation if the model omitted it.
+        // carry the truncated-account-number violation (FCRA §1681g(a)(1)).
+        // Inject the standard violation if the model omitted it.
         for (const acct of accounts) {
           const num = String(acct.accountNumber || '');
           if (!/[*X]/i.test(num) || /NOT VISIBLE/i.test(num)) continue;
@@ -1148,13 +1184,13 @@ If the uploads include the report's first/header pages, read the consumer name, 
             accountName: acct.accountName,
             title: 'TRUNCATED ACCOUNT NUMBER PREVENTS CONSUMER VERIFICATION',
             severity: 'CRITICAL',
-            statute: 'FCRA §1681g(a)(1); Gillespie v. Equifax Info. Servs. LLC',
+            statute: 'FCRA §1681g(a)(1)',
             issueType: 'Incomplete field',
             reportShows: num,
             shouldShow: 'Full account number sufficient for the consumer to identify and verify the account',
             description: `The account number is displayed as "${num}" — masked to the point that the consumer cannot independently verify that this tradeline belongs to them or match it against their own records.`,
-            impact: 'The consumer cannot verify the account, dispute specific entries, or confirm the tradeline is theirs (Gillespie v. Equifax).',
-            precedent: 'Gillespie v. Equifax Info. Servs. LLC',
+            impact: 'The consumer cannot verify the account, dispute specific entries, or confirm the tradeline is theirs.',
+            precedent: null,
             demand: 'Provide the full account number or delete the tradeline.',
             disputeWording: `The account number is shown only as "${num}." I cannot tell from this masked number whether this account is actually mine.`,
             remedyType: 'explain',
@@ -1192,6 +1228,40 @@ If the uploads include the report's first/header pages, read the consumer name, 
             internalContradiction: null,
             markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: 'Date of 1st Delinquency:' }],
           });
+        }
+
+        // Guard 4: every derogatory account whose report PRINTS a Date of Last
+        // Activity label but leaves it empty must carry the blank-DOLA item —
+        // category 9b. Watts: the FCRA does not require this field, so this is
+        // pled as a §1681g clarity/completeness defect (Gillespie), never as a
+        // mandatory-field omission, and it is written to the bureau as a question.
+        if (reportPrintsDolaLabel) {
+          for (const acct of accounts) {
+            if (acct.dateLastActive) continue;
+            const has = violations.some(v =>
+              v.accountName === acct.accountName &&
+              /LAST ACTIVITY/i.test(String(v.title || '')));
+            if (has) continue;
+            console.log(`[${sessionId}] Guard: injecting blank-DOLA violation for ${f.name} (${acct.accountName})`);
+            violations.push({
+              accountName: acct.accountName,
+              title: 'DATE OF LAST ACTIVITY FIELD BLANK',
+              severity: 'HIGH',
+              statute: 'FCRA §1681g(a); §1681e(b)',
+              issueType: 'Blank field',
+              reportShows: 'FIELD LABELED BUT EMPTY',
+              shouldShow: 'A date of last activity that is explained by the rest of the tradeline, or no label at all',
+              description: 'The report prints a "Date of Last Activity" label for this account and leaves it empty. The account reports derogatory history, so the consumer is left unable to tell from the face of the report when the account last had activity, or to reconcile that against the delinquency dates and the payment history.',
+              impact: 'The tradeline cannot be understood or aged from the face of the report. Gillespie v. Equifax holds that confusion in this field can make the file disclosure unclear — Equifax uses the one field for two contradictory purposes: the last-payment date when an account is current, the delinquency event when it is derogatory.',
+              precedent: 'Gillespie v. Equifax Info. Servs. LLC, 484 F.3d 938 (7th Cir. 2007)',
+              demand: 'Report the date of last activity for this account, or state in writing that there is none.',
+              disputeWording: 'The Date of Last Activity field on this account is blank. What was the date of last activity?',
+              remedyType: 'explain',
+              remedyWording: 'Please report the date of last activity for this account, or tell me in writing that there is none.',
+              internalContradiction: null,
+              markup: [{ page: pageOfAccount(acct.accountName), section: 'Account Information', markText: 'Date of Last Activity:' }],
+            });
+          }
         }
         f.violations = violations;
         // Renumber sequentially — guard-injected violations carry no number, and

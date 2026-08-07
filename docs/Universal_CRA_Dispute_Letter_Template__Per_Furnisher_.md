@@ -97,7 +97,7 @@ I dispute the following [FURNISHER_NAME] accounts as INACCURATE, INCOMPLETE, and
   - "FCRA §1681g(a)(1) - Truncated Account Number"
   - "Metro 2® Field 25 - Missing Date of First Delinquency"
   - "FCRA §1681e(b) - Maximum Possible Accuracy"
-  - "*Gillespie v. Equifax* precedent - Account number verification"
+  - "*Gillespie v. Equifax* precedent - Date of last activity disclosure"
 
 **Demand:**
 [Specific action required - DELETE, CORRECT, PROVIDE VERIFICATION with basis]
@@ -170,7 +170,7 @@ If you delete information due to this dispute, you must not re-report it unless 
 
 **Example precedents to cite if applicable:**
 
-- ***Gillespie v. Equifax Information Services LLC*, 417 F.3d 456 (5th Cir. 2003)** — Truncated account numbers violate FCRA §1681g(a)(1)
+- ***Gillespie v. Equifax Info. Servs. LLC*, 484 F.3d 938 (7th Cir. 2007)** — a CRA amending the date of last activity can render the §1681g file disclosure unclear. This is NOT a truncated-account-number case; truncation is pled under FCRA §1681g(a)(1) alone.
 - ***Seamans v. Temple University*, 507 F.3d 315 (3d Cir. 2007)** — Improper delinquency sequencing violates §1681e(b)
 - ***Bradshaw v. BAC Home Loans Servicing LP*, 681 F. Supp. 2d 1123 (N.D. Ill. 2010)** — Boilerplate e-OSCAR responses fail §1681i(c)
 
