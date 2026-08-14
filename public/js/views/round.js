@@ -246,6 +246,105 @@ Views._quickResults = function (data) {
 
 let roundState = null;
 
+/* Address review.
+   A credit report legitimately carries address history, so an address that
+   doesn't match the ID is NOT an error on its own — only the consumer knows
+   which addresses were never theirs. Every address gets a yes/no, and only a
+   "no" becomes a dispute item. */
+function addressPanel(violationsData, addr) {
+  const consumer = (violationsData && violationsData.consumer) || {};
+  const list = addr.addresses || [];
+  const idAddress = addr.idAddress || '';
+
+  // The personal-information pages weren't part of the upload — say so
+  // plainly. Reporting "no other addresses found" here would read as a clean
+  // bill of health for a check that never ran.
+  if (!consumer.personalInfoSectionPresent || list.length === 0) {
+    return `
+      <div style="margin:16px 0;padding:14px;border:1px solid #cbd5e1;border-radius:12px;background:#f8fafc">
+        <div style="font-weight:700;font-size:15px">Address check skipped</div>
+        <p style="font-size:13px;color:#475569;margin-top:6px">
+          The uploaded pages don't include the report's personal information / address section, so there are no addresses to compare against the ID.
+          To run this check, re-upload including the personal information page.
+        </p>
+      </div>`;
+  }
+
+  const unanswered = list.filter(a => a.lived_there == null).length;
+  const disputed = list.filter(a => a.lived_there === 0).length;
+  const anyMatch = list.some(a => a.matches_id);
+  const notices = [];
+
+  if (list.length > 1) {
+    notices.push(`This report shows <strong>${list.length} addresses</strong> for the consumer. Confirm each one — an address they never lived at is a mixed-file indicator and belongs in the letter.`);
+  }
+  if (idAddress && !anyMatch) {
+    notices.push(`<strong>None of the reported addresses match the ID address</strong> on file (${esc(idAddress)}). Either the report has the wrong address, or the ID address needs correcting on the client record.`);
+  }
+  if (!idAddress) {
+    notices.push('No ID address is on the client record, so nothing was compared automatically. Add it on the client page to enable the match check.');
+  }
+
+  return `
+    <div style="margin:16px 0;padding:16px;border:2px solid ${disputed ? '#dc2626' : '#0284c7'};border-radius:12px;background:${disputed ? '#fef2f2' : '#f0f9ff'}">
+      <div style="font-weight:700;font-size:15px">Addresses on this report — confirm each one</div>
+      ${notices.map(n => `<p style="font-size:13px;color:#334155;margin-top:6px">⚠ ${n}</p>`).join('')}
+      <p style="font-size:13px;color:#64748b;margin:8px 0">
+        Old addresses belong on a credit report — an address you <em>used to</em> live at is not an error. Answer <strong>No</strong> only for an address you have <strong>never</strong> lived at; those become dispute items in the letter.
+      </p>
+      <div id="addrRows">
+        ${list.map(a => addressRow(a, idAddress)).join('')}
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-outline" onclick="Views._answerAllAddresses(1)">All of these are mine</button>
+        <span id="addrStatus" style="font-size:13px;color:${unanswered ? '#b45309' : '#166534'}">
+          ${unanswered ? `${unanswered} address${unanswered === 1 ? '' : 'es'} still unanswered` : `All answered${disputed ? ` — ${disputed} going in the letter` : ''}`}
+        </span>
+      </div>
+    </div>`;
+}
+
+function addressRow(a, idAddress) {
+  const isCurrent = String(a.addr_type || '').toLowerCase() === 'current';
+  const yes = a.lived_there === 1, no = a.lived_there === 0;
+  return `
+    <div class="addr-row" data-addr-id="${a.id}" data-answer="${a.lived_there == null ? '' : a.lived_there}"
+      style="padding:10px;border-top:1px solid #bae6fd">
+      <div style="font-weight:600;font-size:14px">${esc(a.address)}</div>
+      <div style="font-size:12px;color:#64748b;margin:2px 0 6px">
+        ${isCurrent ? '<strong>listed as the current address</strong>' : esc(a.addr_type || 'unknown')}
+        ${a.date_reported ? ` &bull; reported ${esc(a.date_reported)}` : ''}
+        ${a.matches_id ? ' &bull; <span style="color:#166534">matches the ID</span>' : (idAddress ? ' &bull; <span style="color:#b45309">does not match the ID</span>' : '')}
+      </div>
+      <div style="font-size:13px">
+        Have you ever lived at this address?
+        <button class="btn ${yes ? 'btn-primary' : 'btn-outline'}" style="padding:4px 12px;margin-left:8px"
+          onclick="Views._answerAddress(${a.id},1)">Yes</button>
+        <button class="btn ${no ? 'btn-primary' : 'btn-outline'}" style="padding:4px 12px;margin-left:4px"
+          ${a.matches_id ? 'disabled title="This is the address on the enclosed ID — disputing it would contradict the letter\'s own enclosures. Fix the ID address on the client record if it is wrong."' : ''}
+          onclick="Views._answerAddress(${a.id},0)">No — never lived here</button>
+      </div>
+      ${no ? `<div style="margin-top:6px;font-size:13px;color:#991b1b">Goes in the letter as ${isCurrent ? 'a wrong current address' : 'an address that is not mine'}.</div>` : ''}
+    </div>`;
+}
+
+Views._answerAddress = async function (id, answer) {
+  clearError();
+  try {
+    await API.patch('/api/addresses/' + id, { lived_there: answer });
+    Views.round(roundState.campaignId, roundState.round.id);
+  } catch (e) { showError(e.message); }
+};
+
+Views._answerAllAddresses = async function (answer) {
+  clearError();
+  const rows = [...document.querySelectorAll('.addr-row')].filter(r => r.dataset.answer === '');
+  try {
+    for (const r of rows) await API.patch('/api/addresses/' + r.dataset.addrId, { lived_there: answer });
+    Views.round(roundState.campaignId, roundState.round.id);
+  } catch (e) { showError(e.message); }
+};
+
 Views.round = async function (campaignId, roundId) {
   const view = document.getElementById('view');
   const dash = await API.get('/api/campaigns/' + campaignId);
@@ -253,8 +352,15 @@ Views.round = async function (campaignId, roundId) {
   if (!round) { showError('Round not found.'); location.hash = '#/campaign/' + campaignId; return; }
   if (!round.run_id) { showError('This round has no analysis attached.'); location.hash = '#/campaign/' + campaignId; return; }
 
-  const rv = await API.get(`/api/runs/${round.run_id}/violations`);
-  roundState = { campaignId: Number(campaignId), round, dash, violationsData: rv.violationsData, warnings: rv.warnings };
+  const [rv, addr] = await Promise.all([
+    API.get(`/api/runs/${round.run_id}/violations`),
+    API.get(`/api/campaigns/${campaignId}/addresses`),
+  ]);
+  roundState = {
+    campaignId: Number(campaignId), round, dash,
+    violationsData: rv.violationsData, warnings: rv.warnings,
+    addresses: addr.addresses, idAddress: addr.idAddress,
+  };
 
   const decisions = {};
   dash.decisions.forEach(d => { decisions[`${d.furnisher_name}||${d.account_name}`] = d; });
@@ -309,6 +415,7 @@ Views.round = async function (campaignId, roundId) {
       <a href="#/campaign/${campaignId}" class="btn-link">← Campaign</a>
       <h2 class="card-title" style="margin-top:8px">Round ${round.round_number} — review &amp; approve</h2>
       <p class="card-sub">Check the two boxes for every account you're keeping in the letter (uncheck to drop the account). Edit any wording. Then approve — the final letters are regenerated from exactly what you see here.</p>
+      ${addressPanel(rv.violationsData, addr)}
       ${accountsHtml || '<p style="color:#64748b;font-style:italic">No violations in this analysis.</p>'}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px">
         <label style="font-size:13px;font-weight:600">Mail date on the letter: <input type="date" id="genMailDate" value="${todayIso()}" style="padding:8px;border:1px solid #cbd5e1;border-radius:6px"></label>
@@ -372,7 +479,16 @@ Views._gateStates = function () {
 Views._approveRound = async function () {
   clearError();
   const { included, decisions } = Views._gateStates();
-  if (included.length === 0) { showError('No account passes both gates — nothing to put in a letter.'); return; }
+  // The address answers are their own gate — an unanswered address means the
+  // consumer hasn't looked at it yet, and a wrong address is exactly the
+  // finding this panel exists to catch.
+  const unanswered = [...document.querySelectorAll('.addr-row')].filter(r => r.dataset.answer === '').length;
+  if (unanswered > 0) {
+    showError(`${unanswered} address on this report ${unanswered === 1 ? 'has' : 'have'} not been confirmed yet. Answer every address above before approving — a wrong address is its own dispute item.`);
+    return;
+  }
+  const addressItems = [...document.querySelectorAll('.addr-row')].filter(r => r.dataset.answer === '0').length;
+  if (included.length === 0 && addressItems === 0) { showError('No account passes both gates — nothing to put in a letter.'); return; }
   const btn = document.getElementById('approveBtn');
   btn.disabled = true; btn.textContent = 'Generating…';
   try {

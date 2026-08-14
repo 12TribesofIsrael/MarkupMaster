@@ -2,9 +2,12 @@ const {
   Document, Packer, Paragraph, TextRun, HeadingLevel,
   AlignmentType, BorderStyle, Table, TableRow, TableCell,
   WidthType, ShadingType, UnderlineType, Tab, TabStopType, TabStopPosition,
+  ImageRun,
 } = require('docx');
 const fs = require('fs');
+const path = require('path');
 const { getCRA } = require('./cra-addresses');
+const { imageSize } = require('./identity-docs');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const FONT = 'Times New Roman';
@@ -144,6 +147,69 @@ function remedyOf(v) {
   return 'Please correct this, or delete this account if you cannot verify it as complete and accurate.';
 }
 
+// ─── Identity exhibit pages ───────────────────────────────────────────────────
+//
+// The letter states on its face that a photo ID and a proof of address are
+// enclosed. When the consumer has uploaded scans, they are printed as the
+// final pages of the letter itself, so the enclosure cannot be forgotten at
+// the envelope and the mailed copy proves what was sent.
+
+const PAGE_W_PX = 624;   // 6.5in of printable width at 96dpi
+const PAGE_H_PX = 700;   // leaves room for the caption above the image
+
+function exhibitImage(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const data = fs.readFileSync(filePath);
+  const dims = imageSize(data);
+  if (!dims) {
+    console.warn(`Exhibit skipped — could not read image dimensions: ${filePath}`);
+    return null;
+  }
+  const scale = Math.min(PAGE_W_PX / dims.width, PAGE_H_PX / dims.height, 1);
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 120, after: 120 },
+    children: [new ImageRun({
+      data,
+      type: dims.type === 'jpg' ? 'jpg' : 'png',
+      transformation: { width: Math.round(dims.width * scale), height: Math.round(dims.height * scale) },
+    })],
+  });
+}
+
+// Returns the exhibit pages plus the labels to print in the Enclosures list,
+// so the list can distinguish what is attached here from what the consumer
+// still has to add by hand.
+function buildExhibits(clientIdentity = {}, proofName) {
+  const groups = [
+    { paths: clientIdentity.idPages || [], label: 'Copy of my government-issued photo ID' },
+    { paths: clientIdentity.proofPages || [], label: `Copy of ${proofName} showing my name and current address` },
+  ];
+  const children = [];
+  const attached = [];
+  let exhibitNo = 0;
+
+  for (const g of groups) {
+    const images = g.paths.map(exhibitImage).filter(Boolean);
+    if (images.length === 0) continue;
+    exhibitNo++;
+    attached.push(g.label);
+    images.forEach((img, i) => {
+      children.push(new Paragraph({
+        pageBreakBefore: true,
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 120 },
+        children: [new TextRun({
+          text: `EXHIBIT ${exhibitNo}${images.length > 1 ? ` (page ${i + 1} of ${images.length})` : ''} — ${g.label.toUpperCase()}`,
+          bold: true, size: sz(FONT_BODY), font: FONT,
+        })],
+      }));
+      children.push(img);
+    });
+  }
+  return { children, attached };
+}
+
 // ─── WATTS DISPUTE LETTER (the only mailed dispute instrument) ────────────────
 //
 // Doctrine (John G. Watts): plain English, no statute citations, cooperative
@@ -245,16 +311,26 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
   children.push(makeBody(consumer.address || '[Consumer Address]'));
   children.push(blank(120));
 
-  // Enclosures — listed so the record shows exactly what was sent.
+  // Enclosures — listed so the record shows exactly what was sent. Scans the
+  // consumer uploaded are printed as exhibit pages at the end of this letter;
+  // anything not uploaded stays on the list to be added by hand.
+  const exhibits = buildExhibits(clientIdentity, proofName);
+  const isAttached = label => exhibits.attached.includes(label);
+  const idLabel = 'Copy of my government-issued photo ID';
+  const proofLabel = `Copy of ${proofName} showing my name and current address`;
+  const attachedNote = ' (printed as an exhibit at the end of this letter)';
+
   children.push(makeBody('Enclosures:', { bold: true }));
-  children.push(makeBody('1.  Copy of my government-issued photo ID', { indent: true }));
-  children.push(makeBody(`2.  Copy of ${proofName} showing my name and current address`, { indent: true }));
+  children.push(makeBody(`1.  ${idLabel}${isAttached(idLabel) ? attachedNote : ''}`, { indent: true }));
+  children.push(makeBody(`2.  ${proofLabel}${isAttached(proofLabel) ? attachedNote : ''}`, { indent: true }));
   children.push(makeBody('3.  Pages of my credit report with each error circled in red', { indent: true }));
   children.push(blank(80));
 
   // Every furnisher receives a COMPLETE copy of this letter with all
   // enclosures — the furnisher is judged by the notice it had.
-  const withViolations = furnishers.filter(f => (f.violations || []).length > 0);
+  // The personal-information block is the consumer's own file data, not a
+  // furnisher's tradeline — it never gets cc'd or mailed a package.
+  const withViolations = furnishers.filter(f => (f.violations || []).length > 0 && !f.isPersonalInfo);
   if (withViolations.length > 0) {
     children.push(makeBody('cc (each sent a complete copy of this letter with all enclosures, by certified mail):', { bold: true }));
     withViolations.forEach((f, i) => {
@@ -267,6 +343,9 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
   children.push(makeBody('For my records — certified mail tracking:', { bold: true }));
   children.push(makeBody('Tracking # (this letter): ________________________________', { indent: true }));
   children.push(makeBody('Date mailed: ____________________   Return receipt received: ____________________', { indent: true }));
+
+  // ID and proof-of-address scans, as the closing pages of the letter.
+  children.push(...exhibits.children);
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);
@@ -490,13 +569,23 @@ async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputP
     makeBody(consumer.name || '[Consumer Name]', { bold: true }),
     makeBody(consumer.address || '[Consumer Address]'),
     blank(120),
+  ];
+
+  // Same enclosures as the dispute letter, in their own envelope — attach the
+  // scans here too, or this letter draws the identity stall on its own.
+  const exhibits = buildExhibits(clientIdentity, proofName);
+  const idLabel = 'Copy of my government-issued photo ID';
+  const proofLabel = `Copy of ${proofName} showing my name and current address`;
+  const attachedNote = ' (printed as an exhibit at the end of this letter)';
+  children.push(
     makeBody('Enclosures:', { bold: true }),
-    makeBody('1.  Copy of my government-issued photo ID', { indent: true }),
-    makeBody(`2.  Copy of ${proofName} showing my name and current address`, { indent: true }),
+    makeBody(`1.  ${idLabel}${exhibits.attached.includes(idLabel) ? attachedNote : ''}`, { indent: true }),
+    makeBody(`2.  ${proofLabel}${exhibits.attached.includes(proofLabel) ? attachedNote : ''}`, { indent: true }),
     blank(80),
     makeBody('For my records — certified mail tracking:', { bold: true }),
     makeBody('Tracking #: ________________________________   Date mailed: ____________________', { indent: true }),
-  ];
+    ...exhibits.children,
+  );
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);
@@ -505,11 +594,22 @@ async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputP
 
 // ─── MAILING INSTRUCTIONS ─────────────────────────────────────────────────────
 
-async function generateMailingInstructionsDocx(violationsData, outputPath) {
+async function generateMailingInstructionsDocx(violationsData, outputPath, clientIdentity = {}) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   const consumer = (violationsData && violationsData.consumer) || {};
-  const furnishers = ((violationsData && violationsData.furnishers) || []).filter(f => (f.violations || []).length > 0);
+  const furnishers = ((violationsData && violationsData.furnishers) || [])
+    .filter(f => (f.violations || []).length > 0 && !f.isPersonalInfo);
   const cra = getCRA(consumer.bureau);
+  // When the scans are printed into the letters, the checklist says "already
+  // in the letter" instead of telling the consumer to go find a copier.
+  const hasIdScan = (clientIdentity.idPages || []).some(p => p && fs.existsSync(p));
+  const hasProofScan = (clientIdentity.proofPages || []).some(p => p && fs.existsSync(p));
+  const idLine = hasIdScan
+    ? '☑  Copy of government-issued photo ID — ALREADY PRINTED as an exhibit at the end of the letter. Check that it printed legibly; add the back of the card if your ID has one.'
+    : '☐  Copy of government-issued photo ID (front & back)';
+  const proofLine = hasProofScan
+    ? '☑  Proof of current address — ALREADY PRINTED as an exhibit at the end of the letter. Check that it printed legibly and is dated within 60 days.'
+    : '☐  Proof of current address (utility bill or bank statement, dated within 60 days)';
 
   // Printed as guidance only — the campaign tracker computes the real
   // deadlines from the date you actually mail.
@@ -547,24 +647,24 @@ async function generateMailingInstructionsDocx(violationsData, outputPath) {
   children.push(makeSubHeading(`PACKAGE 1: ${cra.name} — THE DISPUTE`));
   children.push(makeBody(`Address: ${cra.name}, ${cra.dept ? cra.dept + ', ' : ''}${cra.addr}, ${cra.city}`));
   children.push(makeBody('☐  Signed dispute letter (date it the day you mail it)', { indent: true }));
-  children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
-  children.push(makeBody('☐  Proof of current address (utility bill or bank statement, dated within 60 days)', { indent: true }));
+  children.push(makeBody(idLine, { indent: true }));
+  children.push(makeBody(proofLine, { indent: true }));
   children.push(makeBody('☐  Credit report pages with the errors circled in red (use the annotated copy or mark a fresh copy per the Markup Map)', { indent: true }));
   children.push(blank(80));
 
   children.push(makeSubHeading(`PACKAGE 2: ${cra.name} — THE FULL-FILE REQUEST`));
   children.push(makeBody(`Address: same as Package 1 — but a SEPARATE envelope with its own tracking number.`));
   children.push(makeBody('☐  Signed full-file request letter (date it the day you mail it)', { indent: true }));
-  children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
-  children.push(makeBody('☐  Proof of current address (dated within 60 days)', { indent: true }));
+  children.push(makeBody(idLine, { indent: true }));
+  children.push(makeBody(proofLine, { indent: true }));
   children.push(blank(80));
 
   furnishers.forEach((f, i) => {
     children.push(makeSubHeading(`PACKAGE ${i + 3}: ${f.name.toUpperCase()} — COURTESY COPY OF THE DISPUTE`));
     children.push(makeBody(`Address: ${f.address || '[Furnisher address — from the credit report or the letter\'s cc list]'}`));
     children.push(makeBody('☐  COMPLETE copy of the dispute letter', { indent: true }));
-    children.push(makeBody('☐  Copy of government-issued photo ID (front & back)', { indent: true }));
-    children.push(makeBody('☐  Proof of current address (dated within 60 days)', { indent: true }));
+    children.push(makeBody(idLine, { indent: true }));
+    children.push(makeBody(proofLine, { indent: true }));
     children.push(makeBody('☐  Credit report pages with the errors circled in red', { indent: true }));
     children.push(makeBody('Why: the furnisher is judged by the notice it had. This copy does not replace the CRA dispute — it makes sure the furnisher has your full letter when the CRA\'s notice arrives.', { indent: true, italic: true }));
     children.push(blank(80));

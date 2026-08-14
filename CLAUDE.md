@@ -10,8 +10,9 @@ corpus in `c:\Users\Claude\Litigation`):
 
 1. Upload credit report pages (JPG/PNG/PDF) → Claude (`claude-sonnet-4-6`) runs the 33-point
    Metro 2® audit with the `docs/` knowledge base as system context
-2. The consumer reviews per-account **gates** (actually-wrong + thrilled-if-deleted), edits
-   wording, and approves — only then are final letters generated
+2. The consumer reviews per-account **gates** (actually-wrong + thrilled-if-deleted) and
+   confirms every address the report prints against their photo ID, edits wording, and
+   approves — only then are final letters generated
 3. Mail dates / tracking / delivery are captured; the 30-day §1681i clock is tracked
 4. When results arrive, **response intake** diffs every item (fixed / deleted /
    verified-unchanged / unclear), drafts a FINAL NOTICE round 2/3 from the verified items,
@@ -36,12 +37,16 @@ corpus in `c:\Users\Claude\Litigation`):
 ```
 server.js            Express app: PIN gate, campaign REST API, /analyze, intake, generate
 db.js                better-sqlite3 store: clients, campaigns, reports, runs, rounds,
-                     account_decisions, violation_items, events (the chronology)
+                     account_decisions, violation_items, report_addresses,
+                     events (the chronology)
 docx-generator.js    All document generators (Watts letter, memo, 1681g, mailing, markup
-                     map, results diff, MOV request)
+                     map, results diff, MOV request) + the ID/proof exhibit pages
+identity-docs.js     Photo ID + proof-of-address scans: PDF→PNG normalization, PNG/JPEG
+                     header dimension reader (no image dependency)
 cra-addresses.js     Single source of truth for CRA dispute addresses
 pdf-annotator.js     Red-box annotation of the report copy (text layer / OCR / model bbox)
 ocr_words.py         pytesseract word-box helper (needs python + tesseract on PATH)
+render_pdf_pages.py  pymupdf PDF→PNG page renderer (identity documents)
 public/              Vanilla-JS SPA: js/api.js, js/router.js, js/views/{clients,campaign,
                      round,intake,chronology}.js — hash-routed, no build step
 docs/                Knowledge base loaded into the system prompt (40k chars/file cap)
@@ -89,3 +94,21 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
   its real-world date; the memo pleads straight from it.
 - Human approval is mandatory: `POST /api/rounds/:id/generate` is the only path to final
   letters (CRO-liability lesson — no unreviewed letters in the consumer's name).
+- The photo ID and proof of address the consumer uploads are stored **on the client**
+  (`clients.id_doc_paths` / `proof_doc_paths`, JSON arrays of PNG/JPG paths) and print as
+  EXHIBIT pages at the end of both the dispute letter and the §1681g letter. The letters
+  assert on their face that both are enclosed — never ship a change that drops the exhibits
+  while leaving that sentence in. When a scan is missing, the enclosure stays on the list and
+  Mailing_Instructions prints an unchecked box instead of "already printed".
+- **Address doctrine: a report legitimately carries address history, so an address that does
+  not match the ID is NOT a violation.** Never auto-inject an address dispute. `/analyze`
+  only *lists* addresses (`consumer.addressesOnReport` + `personalInfoSectionPresent`);
+  the consumer answers "have you ever lived here" per address, and only a confirmed **no**
+  becomes an item. An address matching the ID can never be disputed — the letter would
+  contradict its own enclosures — and both the PATCH endpoint and `addressViolations()`
+  refuse it. If the personal-information page was not uploaded, say the check was skipped;
+  never report "no other addresses found".
+- Address items ship as a `MY PERSONAL INFORMATION` pseudo-furnisher (`isPersonalInfo: true`)
+  spliced in at generate time, always first so it takes item 1. It is excluded from the cc
+  list, the mailing packages, and the account gate — its gate is the per-address answers.
+  Generation renumbers every item afterward and resyncs `violation_items.item_number`.

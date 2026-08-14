@@ -12,6 +12,7 @@ const pdfParse = require('pdf-parse');
 const cookieParser = require('cookie-parser');
 const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx, generateResultsDiffDocx, generateMovLetterDocx } = require('./docx-generator');
 const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
+const identityDocs = require('./identity-docs');
 const store = require('./db');
 
 const app = express();
@@ -203,16 +204,93 @@ function repairTruncatedJson(text) {
 
 // ─── Campaign / client REST API ──────────────────────────────────────────────
 
-app.get('/api/clients', requirePin, (req, res) => res.json(store.listClients()));
+app.get('/api/clients', requirePin, (req, res) => res.json(store.listClients().map(clientWithDocs)));
 app.post('/api/clients', requirePin, (req, res) => {
   const b = req.body || {};
   if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Client name is required.' });
-  res.json(store.createClient(b));
+  const c = store.createClient(b);
+  if (b.id_address) store.updateClient(c.id, { id_address: b.id_address });
+  res.json(clientWithDocs(store.getClient(c.id)));
 });
 app.patch('/api/clients/:id', requirePin, (req, res) => {
-  const c = store.updateClient(Number(req.params.id), req.body || {});
+  const id = Number(req.params.id);
+  const c = store.updateClient(id, req.body || {});
   if (!c) return res.status(404).json({ error: 'Client not found.' });
-  res.json(c);
+  // The ID address is the anchor every report address is compared against —
+  // changing it re-scores the matches on this client's live campaigns.
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'id_address')) {
+    for (const camp of store.db.prepare('SELECT id FROM campaigns WHERE client_id=?').all(id)) {
+      store.refreshAddressMatches(camp.id, c.id_address);
+    }
+  }
+  res.json(clientWithDocs(c));
+});
+
+// ─── Identity documents (photo ID + proof of address) ────────────────────────
+// Held on the client, not the campaign: the same license and utility bill get
+// enclosed with every letter to every bureau, round after round.
+
+const DOC_SLOTS = { id: 'photo ID', proof: 'proof of address' };
+
+function clientDocDir(clientId) {
+  return path.join(store.DATA_DIR, 'files', 'clients', String(clientId));
+}
+// Never hand raw filesystem paths to the browser — expose a count and a
+// stable per-page URL instead.
+function clientWithDocs(client) {
+  if (!client) return client;
+  const out = { ...client };
+  delete out.id_doc_paths;
+  delete out.proof_doc_paths;
+  for (const slot of Object.keys(DOC_SLOTS)) {
+    const paths = store.clientDocPaths(client, slot).filter(p => fs.existsSync(p));
+    out[`${slot}_doc_pages`] = paths.map((_, i) => `/api/clients/${client.id}/identity-docs/${slot}/${i}`);
+  }
+  return out;
+}
+
+app.post('/api/clients/:id/identity-docs', requirePin, (req, res, next) => {
+  req.sessionId = uuidv4();
+  next();
+}, upload.fields([{ name: 'id', maxCount: 4 }, { name: 'proof', maxCount: 4 }]), (req, res) => {
+  const id = Number(req.params.id);
+  const client = store.getClient(id);
+  if (!client) return res.status(404).json({ error: 'Client not found.' });
+  try {
+    let updated = client;
+    for (const slot of Object.keys(DOC_SLOTS)) {
+      const files = (req.files || {})[slot] || [];
+      if (files.length === 0) continue;
+      const paths = identityDocs.storeClientDocs(clientDocDir(id), slot, files, store.clientDocPaths(client, slot));
+      updated = store.setClientDocs(id, slot, paths);
+    }
+    res.json(clientWithDocs(updated));
+  } catch (err) {
+    console.error('identity-docs upload failed:', err);
+    res.status(400).json({ error: err.message || 'Could not store the documents.' });
+  } finally {
+    fs.rmSync(path.join(__dirname, 'uploads', req.sessionId), { recursive: true, force: true });
+  }
+});
+
+app.get('/api/clients/:id/identity-docs/:slot/:idx', requirePin, (req, res) => {
+  const { slot, idx } = req.params;
+  if (!DOC_SLOTS[slot]) return res.status(400).json({ error: 'Unknown slot.' });
+  const client = store.getClient(Number(req.params.id));
+  if (!client) return res.status(404).json({ error: 'Client not found.' });
+  const p = store.clientDocPaths(client, slot)[Number(idx)];
+  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Document page not found.' });
+  res.sendFile(p);
+});
+
+app.delete('/api/clients/:id/identity-docs/:slot', requirePin, (req, res) => {
+  const { slot } = req.params;
+  if (!DOC_SLOTS[slot]) return res.status(400).json({ error: 'Unknown slot.' });
+  const id = Number(req.params.id);
+  const client = store.getClient(id);
+  if (!client) return res.status(404).json({ error: 'Client not found.' });
+  for (const p of store.clientDocPaths(client, slot)) fs.rmSync(p, { force: true });
+  res.json(clientWithDocs(store.setClientDocs(id, slot, [])));
 });
 
 app.get('/api/campaigns', requirePin, (req, res) => res.json(store.listCampaigns()));
@@ -225,7 +303,7 @@ app.post('/api/campaigns', requirePin, (req, res) => {
 app.get('/api/campaigns/:id', requirePin, (req, res) => {
   const dash = store.campaignDashboard(Number(req.params.id));
   if (!dash) return res.status(404).json({ error: 'Campaign not found.' });
-  res.json(dash);
+  res.json({ ...dash, client: clientWithDocs(dash.client) });
 });
 app.delete('/api/campaigns/:id', requirePin, (req, res) => {
   const id = Number(req.params.id);
@@ -258,6 +336,11 @@ app.patch('/api/rounds/:id', requirePin, (req, res) => {
       const stmt = store.db.prepare(`UPDATE violation_items SET status=?, status_round=?
         WHERE run_id=? AND status='open' AND furnisher_name=? AND (account_name=? OR account_name IS NULL)`);
       for (const d of included) stmt.run(sent, round.round_number, round.run_id, d.furnisher_name, d.account_name);
+      // Personal-information items are gated by the per-address answers, not
+      // by account_decisions, so mark them sent alongside the tradeline items.
+      store.db.prepare(`UPDATE violation_items SET status=?, status_round=?
+        WHERE run_id=? AND status='open' AND furnisher_name=?`)
+        .run(sent, round.round_number, round.run_id, PERSONAL_INFO_FURNISHER);
     } else {
       // No recorded gate decisions (quick/legacy flow) — treat all as sent.
       store.setItemsStatusByRun(round.run_id, 'open', sent, round.round_number);
@@ -280,6 +363,108 @@ app.post('/api/campaigns/:id/decisions', requirePin, (req, res) => {
   }
   res.json(store.getDecisions(id));
 });
+
+// ─── Report addresses: the ID-vs-report comparison gate ──────────────────────
+//
+// A report legitimately carries address history, so a mismatch against the
+// consumer's ID proves nothing on its own — an old address is supposed to be
+// there. Only the consumer can say which addresses were never theirs, so
+// every address is surfaced for a yes/no answer and only a confirmed "no"
+// (or a current address they do not live at) becomes a dispute item.
+
+const PERSONAL_INFO_FURNISHER = 'MY PERSONAL INFORMATION';
+
+app.get('/api/campaigns/:id/addresses', requirePin, (req, res) => {
+  const id = Number(req.params.id);
+  const campaign = store.getCampaign(id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+  const client = store.getClient(campaign.client_id);
+  res.json({
+    idAddress: client ? client.id_address || '' : '',
+    addresses: store.getReportAddresses(id),
+  });
+});
+
+app.patch('/api/addresses/:id', requirePin, (req, res) => {
+  const row = store.db.prepare('SELECT * FROM report_addresses WHERE id=?').get(Number(req.params.id));
+  if (!row) return res.status(404).json({ error: 'Address not found.' });
+  const { lived_there } = req.body || {};
+  if (lived_there !== 0 && lived_there !== 1 && lived_there !== null) {
+    return res.status(400).json({ error: 'lived_there must be 1 (yes), 0 (no), or null (unanswered).' });
+  }
+  // "I have never lived at the address printed on my own ID" is a
+  // contradiction, and a letter built on it disputes the consumer's own
+  // evidence — the exact self-defeating item the gate exists to prevent.
+  // The real fix is upstream: the ID address on the client record is wrong.
+  if (lived_there === 0 && row.matches_id) {
+    return res.status(400).json({
+      error: `"${row.address}" matches the address on the ID and proof of address on file, so it cannot be disputed as an address you never lived at — the letter would contradict its own enclosures. If the ID address is wrong, correct it on the client record first.`,
+    });
+  }
+  res.json(store.setAddressAnswer(row.id, lived_there));
+});
+
+// Build the personal-information dispute items from the consumer's answers.
+// Two distinct findings, worded differently because they mean different things:
+// an address they never lived at is a mixed-file indicator; a wrong current
+// address also means the results of the investigation get mailed elsewhere.
+function addressViolations(campaignId, idAddress) {
+  const rows = store.getReportAddresses(campaignId);
+  const violations = [];
+
+  for (const r of rows) {
+    if (r.lived_there !== 0) continue;   // only a confirmed "never lived here"
+    // Belt and braces against the contradiction the PATCH endpoint rejects:
+    // an address matching the enclosed ID never becomes a dispute item, even
+    // if a stale answer predates the current ID address on file.
+    if (r.matches_id) {
+      console.warn(`Address item skipped — "${r.address}" matches the ID address on file.`);
+      continue;
+    }
+    const isCurrent = String(r.addr_type || '').toLowerCase() === 'current';
+    violations.push({
+      accountName: null,
+      title: isCurrent ? 'CURRENT ADDRESS ON FILE IS NOT MINE' : 'ADDRESS REPORTED THAT IS NOT MINE',
+      severity: 'CRITICAL',
+      statute: 'FCRA §1681e(b)',
+      issueType: 'Inaccurate personal information',
+      reportShows: r.address,
+      shouldShow: idAddress ? `Only addresses where I have actually lived (my address is ${idAddress})` : 'Only addresses where I have actually lived',
+      description: `The personal information section reports "${r.address}"${r.date_reported ? ` (reported ${r.date_reported})` : ''}. The consumer has confirmed they have never lived at this address. An address the consumer never held is a strong indicator that another person's information has been merged into this file.`,
+      impact: isCurrent
+        ? 'The file identifies the consumer by an address that is not theirs, which both misidentifies them to anyone pulling the report and sends the results of any investigation to the wrong place.'
+        : 'An address the consumer never held in the file is an indicator of a mixed or partially merged file, and it can pull another person\'s accounts onto this report.',
+      precedent: null,
+      demand: 'Delete this address from my file and identify the source that reported it.',
+      disputeWording: isCurrent
+        ? `My report lists "${r.address}" as my current address. That is not my address and I have never lived there. My address is ${idAddress || '[see the enclosed ID and proof of address]'}, which matches the ID and proof of address enclosed with this letter.`
+        : `My report lists "${r.address}" as one of my addresses. I have never lived at that address.`,
+      remedyType: 'delete',
+      remedyWording: isCurrent
+        ? 'Please remove this address from my file, show my correct address as it appears on the enclosed ID, and tell me in writing who reported it.'
+        : 'Please remove this address from my file and tell me in writing who reported it.',
+      internalContradiction: null,
+      markup: [{ page: r.page != null ? r.page : 1, section: 'Personal Information', markText: r.address }],
+    });
+  }
+  return violations;
+}
+
+// Splice the personal-information items into the violations JSON as a
+// pseudo-furnisher. It carries no accounts and is never cc'd or mailed a
+// package — it is the consumer's own file data, not a furnisher's tradeline.
+function withAddressViolations(data, campaignId, idAddress) {
+  const violations = addressViolations(campaignId, idAddress);
+  const furnishers = (data.furnishers || []).filter(f => f.name !== PERSONAL_INFO_FURNISHER);
+  if (violations.length === 0) return { ...data, furnishers };
+  return {
+    ...data,
+    furnishers: [
+      { name: PERSONAL_INFO_FURNISHER, address: null, phone: null, isCollector: false, isPersonalInfo: true, accounts: [], violations },
+      ...furnishers,
+    ],
+  };
+}
 
 // ─── Run violations: fetch / edit / regenerate ───────────────────────────────
 
@@ -353,7 +538,12 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
     const full = JSON.parse(fs.readFileSync(p, 'utf8'));
     const { mailDate, includedAccounts } = req.body || {};
 
-    // Restrict to approved accounts when a selection is provided.
+    const campaign = store.getCampaign(round.campaign_id);
+    const client = campaign ? store.getClient(campaign.client_id) : null;
+
+    // Restrict to approved accounts when a selection is provided. The
+    // personal-information block has its own gate (the per-address answers),
+    // so it is never filtered out by the account selection.
     let data = full;
     if (Array.isArray(includedAccounts)) {
       const keep = new Set(includedAccounts.map(x => `${x.furnisher}||${x.account}`));
@@ -365,15 +555,22 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
           violations: (f.violations || []).filter(v => keep.has(`${f.name}||${v.accountName}`)),
         })).filter(f => (f.violations || []).length > 0),
       };
-      if (data.furnishers.length === 0) return res.status(400).json({ error: 'No accounts selected — nothing to generate.' });
     }
+    data = withAddressViolations(data, round.campaign_id, client ? client.id_address : null);
+    if ((data.furnishers || []).length === 0) {
+      return res.status(400).json({ error: 'No accounts selected — nothing to generate.' });
+    }
+    // Item numbers are global across the letter and the markup map — renumber
+    // after the personal-information block goes in at the top.
+    let itemNo = 0;
+    for (const f of data.furnishers) for (const v of (f.violations || [])) v.number = ++itemNo;
 
-    const campaign = store.getCampaign(round.campaign_id);
-    const client = campaign ? store.getClient(campaign.client_id) : null;
     const clientIdentity = client ? {
       phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
       dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
       proofOfAddress: client.proof_of_address || '',
+      idPages: store.clientDocPaths(client, 'id'),
+      proofPages: store.clientDocPaths(client, 'proof'),
     } : {};
 
     // Round 2/3: recite the prior round's real dates and tracking.
@@ -394,7 +591,7 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
     if (round.round_number === 1) {
       await generateFileDisclosureDocx(data.consumer, clientIdentity, path.join(outputDir, 'Full_File_Request.docx'));
     }
-    await generateMailingInstructionsDocx(data, path.join(outputDir, 'Mailing_Instructions.docx'));
+    await generateMailingInstructionsDocx(data, path.join(outputDir, 'Mailing_Instructions.docx'), clientIdentity);
 
     // Rebuild the ZIP from everything in the session dir (except the zip itself).
     const zipPath = path.join(outputDir, 'BMB_Dispute_Package.zip');
@@ -402,6 +599,40 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
       .filter(n => n !== 'BMB_Dispute_Package.zip' && n !== 'raw_response.txt')
       .map(n => path.join(outputDir, n));
     await zipFiles(all, zipPath, outputDir);
+
+    // Track the personal-information items alongside the tradeline items so
+    // response intake diffs them and the memo pleads them. They are derived
+    // from the address answers, so they are re-derived on every approval —
+    // any status already recorded for the same address is carried over.
+    const piFurnisher = (data.furnishers || []).find(f => f.isPersonalInfo);
+    const priorPi = store.db.prepare(
+      'SELECT * FROM violation_items WHERE campaign_id=? AND run_id=? AND furnisher_name=?')
+      .all(round.campaign_id, run.id, PERSONAL_INFO_FURNISHER);
+    const priorStatus = {};
+    for (const row of priorPi) {
+      try { priorStatus[JSON.parse(row.detail_json || '{}').reportShows] = row; } catch { /* malformed row */ }
+    }
+    store.db.prepare('DELETE FROM violation_items WHERE campaign_id=? AND run_id=? AND furnisher_name=?')
+      .run(round.campaign_id, run.id, PERSONAL_INFO_FURNISHER);
+    if (piFurnisher) {
+      const ins = store.db.prepare(`INSERT INTO violation_items
+        (campaign_id,run_id,furnisher_name,account_name,item_number,title,severity,statute,issue_type,remedy_type,is_collector,status,status_round,detail_json)
+        VALUES (?,?,?,NULL,?,?,?,?,?,?,0,?,?,?)`);
+      for (const v of piFurnisher.violations) {
+        const prev = priorStatus[v.reportShows];
+        ins.run(round.campaign_id, run.id, PERSONAL_INFO_FURNISHER, v.number, v.title, v.severity,
+          v.statute, v.issueType, v.remedyType,
+          prev ? prev.status : 'open', prev ? prev.status_round : null, JSON.stringify(v));
+      }
+    }
+    // Resync stored item numbers to the numbering the letter actually printed.
+    const renum = store.db.prepare(`UPDATE violation_items SET item_number=?
+      WHERE campaign_id=? AND run_id=? AND furnisher_name=? AND IFNULL(account_name,'')=? AND IFNULL(title,'')=?`);
+    for (const f of (data.furnishers || [])) {
+      for (const v of (f.violations || [])) {
+        renum.run(v.number, round.campaign_id, run.id, f.name, v.accountName || '', v.title || '');
+      }
+    }
 
     store.db.prepare('UPDATE rounds SET status=? WHERE id=?').run('approved', round.id);
     store.addEvent({
@@ -977,7 +1208,16 @@ Output your findings as structured JSON between <VIOLATIONS_JSON> and </VIOLATIO
     "name": "Full Name as shown on report",
     "address": "Full Address as shown on report",
     "reportDate": "MM/DD/YYYY as shown on report",
-    "bureau": "Experian|Equifax|TransUnion as shown on report"
+    "bureau": "Experian|Equifax|TransUnion as shown on report",
+    "personalInfoSectionPresent": "true ONLY if the uploaded pages actually include the report's personal information / consumer identification / address section. false if those pages were not uploaded.",
+    "addressesOnReport": [
+      {
+        "address": "One address EXACTLY as printed, including unit and ZIP",
+        "type": "current|previous|unknown — 'current' only if the report labels it current/most recent",
+        "dateReported": "date reported / date first reported as shown, or null",
+        "page": "1-based page number of the uploaded file this address appears on, or null"
+      }
+    ]
   },
   "summary": {
     "total": 0,
@@ -1058,6 +1298,7 @@ IMPORTANT QUALITY RULES:
 - Do NOT generate a violation if your own analysis concludes the data is actually correct. If you check a category and find no issue, skip it — do not create a violation with a title claiming a problem and then a body saying there is no problem.
 - Number violations sequentially across ALL accounts per furnisher (not restarting at 1 per account).
 - There is NO minimum violation count. Zero violations for an account is a valid and correct result. Never invent, stretch, or pad a violation to reach a count — every dispute must be one the consumer could defend under oath.
+- ADDRESSES — REPORT THEM, DO NOT JUDGE THEM. Read the personal information / consumer identification section and list EVERY address printed there in "consumer.addressesOnReport", including old and variant spellings, exactly as printed. A credit report legitimately carries address history, so an address the consumer no longer lives at is NOT by itself an error: NEVER create a violation for an address. Only the consumer can say which addresses are not theirs, and the app asks them separately. If the uploaded pages do not include the personal information section, set "personalInfoSectionPresent": false and leave "addressesOnReport" as an empty array — do not infer addresses from tradeline data or invent one.
 - EVERY violation MUST include issueType, disputeWording, remedyType, remedyWording, and at least one markup entry with the real PDF page number where the field appears. If a contradiction spans two locations, include both markup entries (both belong to the same item).
 - Do not invent missing dates, balances, or payment amounts in disputeWording — phrase missing data as a question ("What was the monthly payment?").
 - Never claim fraud or identity theft unless the report itself supports it.`;
@@ -1114,6 +1355,21 @@ If the uploads include the report's first/header pages, read the consumer name, 
       return res.status(422).json({
         error: 'Could not detect which credit bureau this report is from. Select Equifax, Experian, or TransUnion in the Credit Bureau dropdown and run the analysis again.',
       });
+    }
+
+    // Normalize the address block. The model returns the flag as a real bool
+    // or the string "true" depending on how it read the schema.
+    const consumerBlock = violationsData.consumer;
+    consumerBlock.personalInfoSectionPresent =
+      consumerBlock.personalInfoSectionPresent === true || consumerBlock.personalInfoSectionPresent === 'true';
+    if (!Array.isArray(consumerBlock.addressesOnReport)) consumerBlock.addressesOnReport = [];
+    consumerBlock.addressesOnReport = consumerBlock.addressesOnReport
+      .filter(a => a && String(a.address || '').trim())
+      .map(a => ({ ...a, address: String(a.address).replace(/\s+/g, ' ').trim() }));
+    // The personal-info page was read but only the header address came back —
+    // seed the list so the review panel has the one address to confirm.
+    if (consumerBlock.personalInfoSectionPresent && consumerBlock.addressesOnReport.length === 0 && consumerBlock.address) {
+      consumerBlock.addressesOnReport = [{ address: consumerBlock.address, type: 'current', dateReported: null, page: null }];
     }
 
     // Filter out CRA-as-furnisher entries (TransUnion/Experian/Equifax are CRAs, not furnishers)
@@ -1290,7 +1546,18 @@ If the uploads include the report's first/header pages, read the consumer name, 
 
     // Consumer identity details typed into the wizard (all optional — blanks
     // render as fill-in lines in the letters).
-    const clientIdentity = {
+    // For a campaign run the client record is the source of truth (including
+    // their stored ID / proof-of-address scans); the wizard fields are only
+    // used by the campaign-less quick flow.
+    const analyzeCampaign = store.getCampaign(Number(req.body.campaignId) || 0);
+    const analyzeClient = analyzeCampaign ? store.getClient(analyzeCampaign.client_id) : null;
+    const clientIdentity = analyzeClient ? {
+      phone: analyzeClient.phone || '', phone2: analyzeClient.phone_alt || '', email: analyzeClient.email || '',
+      dob: analyzeClient.dob || '', ssn: analyzeClient.ssn || '', formerNames: analyzeClient.former_names || '',
+      proofOfAddress: analyzeClient.proof_of_address || '',
+      idPages: store.clientDocPaths(analyzeClient, 'id'),
+      proofPages: store.clientDocPaths(analyzeClient, 'proof'),
+    } : {
       phone: req.body.phone || '',
       phone2: req.body.phone2 || '',
       email: req.body.email || '',
@@ -1415,6 +1682,12 @@ If the uploads include the report's first/header pages, read the consumer name, 
       const reportId = store.createReport({ campaign_id: campaignId, kind: 'initial_report', file_paths: stored, report_date: violationsData.consumer.reportDate });
       const runId = store.createRun({ campaign_id: campaignId, report_id: reportId, session_uuid: sessionId, purpose: 'round1_analysis' });
       store.insertViolationItems(campaignId, runId, violationsData);
+      // Every address the report prints, scored against the address on the
+      // consumer's ID. No violation is created here — the consumer answers
+      // "have you lived here" per address before anything reaches a letter.
+      const campClient = store.getClient(store.getCampaign(campaignId).client_id);
+      store.replaceReportAddresses(campaignId, runId,
+        violationsData.consumer.addressesOnReport || [], campClient ? campClient.id_address : null);
       const maxRound = store.db.prepare('SELECT MAX(round_number) m FROM rounds WHERE campaign_id=?').get(campaignId).m || 0;
       try {
         roundInfo = store.createRound({ campaign_id: campaignId, round_number: Math.min(maxRound + 1, 3), run_id: runId });

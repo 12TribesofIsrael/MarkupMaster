@@ -101,7 +101,40 @@ CREATE TABLE IF NOT EXISTS events (
   evidence_path TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Every address the report prints for the consumer. A report legitimately
+-- carries address history, so a mismatch against the ID is NOT a violation on
+-- its own — lived_there is the consumer's own answer, and only a confirmed
+-- "no" (or a current address they do not live at) becomes a dispute item.
+CREATE TABLE IF NOT EXISTS report_addresses (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id),
+  run_id INTEGER REFERENCES runs(id),
+  address TEXT NOT NULL,
+  addr_type TEXT,                                 -- current|previous|unknown, as labeled on the report
+  date_reported TEXT,
+  page INTEGER,
+  matches_id INTEGER DEFAULT 0,                   -- computed: normalizes equal to the ID/proof address
+  lived_there INTEGER,                            -- consumer answer: 1 yes, 0 no, NULL unanswered
+  answered_at TEXT,
+  UNIQUE (campaign_id, address)
+);
 `);
+
+// ─── Migrations ──────────────────────────────────────────────────────────────
+// Additive only — existing databases carry live campaign data.
+function addColumn(table, col, decl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+}
+// Scans of the photo ID and the proof of address, stored per client and
+// reused across every campaign and round. JSON arrays of image paths
+// (front/back of a license, multi-page bill), normalized to PNG on upload.
+addColumn('clients', 'id_doc_paths', 'TEXT');
+addColumn('clients', 'proof_doc_paths', 'TEXT');
+// The address exactly as printed on those documents — the comparison anchor
+// for the report's address list. Blank means "no comparison possible".
+addColumn('clients', 'id_address', 'TEXT');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -138,8 +171,22 @@ function updateClient(id, c) {
   if (!cur) return null;
   const next = { ...cur, ...c, id };
   db.prepare(`UPDATE clients SET name=@name,address=@address,phone=@phone,phone_alt=@phone_alt,email=@email,
-    dob=@dob,ssn=@ssn,former_names=@former_names,proof_of_address=@proof_of_address WHERE id=@id`).run(next);
+    dob=@dob,ssn=@ssn,former_names=@former_names,proof_of_address=@proof_of_address,id_address=@id_address WHERE id=@id`)
+    .run({ ...next, id_address: next.id_address || null });
   return getClient(id);
+}
+
+// Identity-document scans. slot is 'id' or 'proof'; paths is an array of
+// absolute PNG/JPG paths (already normalized by the caller).
+function setClientDocs(id, slot, paths) {
+  const col = slot === 'id' ? 'id_doc_paths' : 'proof_doc_paths';
+  db.prepare(`UPDATE clients SET ${col}=? WHERE id=?`).run(paths && paths.length ? JSON.stringify(paths) : null, id);
+  return getClient(id);
+}
+function clientDocPaths(client, slot) {
+  const raw = client && client[slot === 'id' ? 'id_doc_paths' : 'proof_doc_paths'];
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
 }
 
 // ─── Campaigns ───────────────────────────────────────────────────────────────
@@ -170,6 +217,7 @@ function campaignDashboard(id) {
     decisions: db.prepare('SELECT * FROM account_decisions WHERE campaign_id=?').all(id),
     runs: db.prepare('SELECT * FROM runs WHERE campaign_id=? ORDER BY created_at').all(id),
     reports: db.prepare('SELECT id, campaign_id, kind, report_date, uploaded_at FROM reports WHERE campaign_id=? ORDER BY uploaded_at').all(id),
+    addresses: getReportAddresses(id),
   };
 }
 function deleteCampaign(id) {
@@ -178,6 +226,7 @@ function deleteCampaign(id) {
     db.prepare('DELETE FROM events WHERE campaign_id=?').run(id);
     db.prepare('DELETE FROM violation_items WHERE campaign_id=?').run(id);
     db.prepare('DELETE FROM account_decisions WHERE campaign_id=?').run(id);
+    db.prepare('DELETE FROM report_addresses WHERE campaign_id=?').run(id);
     db.prepare('DELETE FROM rounds WHERE campaign_id=?').run(id);
     db.prepare('DELETE FROM runs WHERE campaign_id=?').run(id);
     db.prepare('DELETE FROM reports WHERE campaign_id=?').run(id);
@@ -299,6 +348,85 @@ function setItemsStatusByRun(run_id, fromStatus, toStatus, status_round) {
     .run(toStatus, status_round || null, run_id, fromStatus);
 }
 
+// ─── Report addresses (the ID-vs-report comparison) ──────────────────────────
+
+// Loose comparison key. Bureaus print the same address a dozen ways
+// ("123 N. Main St. Apt 4" / "123 NORTH MAIN STREET #4"), so compare on a
+// normalized form — otherwise every address looks like a mismatch.
+const SUFFIX = {
+  STREET: 'ST', AVENUE: 'AVE', ROAD: 'RD', DRIVE: 'DR', LANE: 'LN', COURT: 'CT',
+  BOULEVARD: 'BLVD', PLACE: 'PL', TERRACE: 'TER', CIRCLE: 'CIR', PARKWAY: 'PKWY',
+  HIGHWAY: 'HWY', TRAIL: 'TRL', SQUARE: 'SQ',
+  NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+  NORTHEAST: 'NE', NORTHWEST: 'NW', SOUTHEAST: 'SE', SOUTHWEST: 'SW',
+  APARTMENT: 'APT', SUITE: 'STE', BUILDING: 'BLDG', UNIT: 'APT', '#': 'APT',
+};
+function normalizeAddress(s) {
+  if (!s) return '';
+  return String(s)
+    .toUpperCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/#/g, ' APT ')
+    .replace(/(\b\d{5})-\d{4}\b/g, '$1')            // ZIP+4 → ZIP
+    .split(/\s+/)
+    .map(w => SUFFIX[w] || w)
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+const addressesMatch = (a, b) => {
+  const na = normalizeAddress(a), nb = normalizeAddress(b);
+  return !!na && !!nb && na === nb;
+};
+
+// Upsert the addresses read off the report. A consumer answer already on file
+// for the same address survives a re-analysis — they should not have to
+// re-answer "have you lived here" every time a new report is pulled.
+function replaceReportAddresses(campaign_id, run_id, list, idAddress) {
+  const stmt = db.prepare(`INSERT INTO report_addresses
+      (campaign_id,run_id,address,addr_type,date_reported,page,matches_id)
+    VALUES (@campaign_id,@run_id,@address,@addr_type,@date_reported,@page,@matches_id)
+    ON CONFLICT (campaign_id,address) DO UPDATE SET
+      run_id=excluded.run_id, addr_type=excluded.addr_type,
+      date_reported=excluded.date_reported, page=excluded.page,
+      matches_id=excluded.matches_id`);
+  const tx = db.transaction(() => {
+    for (const a of (list || [])) {
+      const address = String(a.address || '').trim();
+      if (!address) continue;
+      stmt.run({
+        campaign_id, run_id: run_id || null, address,
+        addr_type: a.type || a.addr_type || 'unknown',
+        date_reported: a.dateReported || a.date_reported || null,
+        page: a.page != null ? Number(a.page) : null,
+        matches_id: addressesMatch(address, idAddress) ? 1 : 0,
+      });
+    }
+  });
+  tx();
+  return getReportAddresses(campaign_id, run_id);
+}
+// The current address is the one most likely to be wrong in a way that
+// matters (results get mailed there), so it always sorts to the top.
+const ADDR_ORDER = `ORDER BY CASE WHEN LOWER(IFNULL(addr_type,'')) = 'current' THEN 0 ELSE 1 END, id`;
+function getReportAddresses(campaign_id, run_id) {
+  return run_id
+    ? db.prepare(`SELECT * FROM report_addresses WHERE campaign_id=? AND run_id=? ${ADDR_ORDER}`).all(campaign_id, run_id)
+    : db.prepare(`SELECT * FROM report_addresses WHERE campaign_id=? ${ADDR_ORDER}`).all(campaign_id);
+}
+function setAddressAnswer(id, lived_there) {
+  db.prepare('UPDATE report_addresses SET lived_there=?, answered_at=? WHERE id=?')
+    .run(lived_there == null ? null : (lived_there ? 1 : 0),
+      lived_there == null ? null : new Date().toISOString().slice(0, 10), id);
+  return db.prepare('SELECT * FROM report_addresses WHERE id=?').get(id);
+}
+// Recompute matches_id for a campaign after the client's ID address changes.
+function refreshAddressMatches(campaign_id, idAddress) {
+  const rows = getReportAddresses(campaign_id);
+  const stmt = db.prepare('UPDATE report_addresses SET matches_id=? WHERE id=?');
+  for (const r of rows) stmt.run(addressesMatch(r.address, idAddress) ? 1 : 0, r.id);
+}
+
 // ─── Events (the chronology) ─────────────────────────────────────────────────
 
 function addEvent({ campaign_id, round_id, type, event_date, details, evidence_path }) {
@@ -312,7 +440,8 @@ const getEvents = campaign_id => db.prepare('SELECT * FROM events WHERE campaign
 
 module.exports = {
   db, addDays, addYears,
-  listClients, getClient, createClient, updateClient,
+  listClients, getClient, createClient, updateClient, setClientDocs, clientDocPaths,
+  normalizeAddress, addressesMatch, replaceReportAddresses, getReportAddresses, setAddressAnswer, refreshAddressMatches,
   listCampaigns, getCampaign, createCampaign, campaignDashboard, deleteCampaign, setCampaignStatus, setSolDeadline,
   createReport, createRun, getRun, listRunUuids,
   getRound, createRound, updateRound,
