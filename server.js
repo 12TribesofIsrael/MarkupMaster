@@ -511,7 +511,9 @@ app.get('/api/runs/:id/violations', requirePin, (req, res) => {
   const p = runViolationsPath(run);
   if (!fs.existsSync(p)) return res.status(404).json({ error: 'Violations data missing for this run.' });
   const violationsData = JSON.parse(fs.readFileSync(p, 'utf8'));
-  res.json({ run, violationsData, warnings: computeWarnings(violationsData) });
+  const ap = path.join(path.dirname(p), 'annotation_status.json');
+  const annotation = fs.existsSync(ap) ? JSON.parse(fs.readFileSync(ap, 'utf8')) : null;
+  res.json({ run, violationsData, warnings: computeWarnings(violationsData), annotation });
 });
 
 app.patch('/api/runs/:id/violations', requirePin, (req, res) => {
@@ -1608,6 +1610,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
     // Full-report mode (PDF): boxes are placed by searching the text layer.
     // Snapshot mode (image): boxes come from model-supplied bbox coordinates.
     let imageIndex = 0;
+    const annotationStatus = [];
     for (const file of req.files) {
       const ext = path.extname(file.originalname).toLowerCase();
       const isPdf = ext === '.pdf';
@@ -1648,7 +1651,22 @@ If the uploads include the report's first/header pages, read the consumer name, 
             }
           }
         }
-        console.log(`[${sessionId}] Annotated ${file.originalname}: ${stats.located}/${stats.totalItems} items boxed${stats.missed.length ? ` (not located: ${stats.missed.map(m => m.item).join(', ')})` : ''}`);
+        console.log(`[${sessionId}] Annotated ${file.originalname}: ${stats.located}/${stats.totalItems} items boxed${stats.method === 'ocr' ? ' via OCR (scanned PDF)' : ''}${stats.missed.length ? ` (not located: ${stats.missed.map(m => m.item).join(', ')})` : ''}`);
+        // A heading fallback puts a box near the item rather than on it — that
+        // happens when the disputed field is absent from the report altogether
+        // (a missing DOFD has no text to circle). Worth flagging, not an error.
+        const weak = [...new Set((stats.marks || [])
+          .filter(m => m.strategy === 'section-fallback' || m.strategy === 'furnisher-fallback')
+          .map(m => m.item))];
+        annotationStatus.push({
+          file: file.originalname,
+          located: stats.located,
+          totalItems: stats.totalItems,
+          missed: stats.missed.map(m => m.item),
+          weak,
+          method: stats.method || (isPdf ? 'text-layer' : 'snapshot'),
+          ocrError: stats.ocrError || null,
+        });
         if (stats.located > 0) {
           generatedFiles.push({ name: annotatedName, path: annotatedPath, label: `Annotated Credit Report (red boxes) — ${file.originalname}` });
         } else {
@@ -1659,8 +1677,13 @@ If the uploads include the report's first/header pages, read the consumer name, 
         }
       } catch (e) {
         console.warn(`[${sessionId}] Annotation failed for ${file.originalname}:`, e.message);
+        annotationStatus.push({ file: file.originalname, located: 0, totalItems: 0, missed: [], method: 'failed', error: e.message });
       }
     }
+    // A missing markup copy must be visible in the app, not just in the console
+    // — the annotated report is a mailed enclosure, so a silent miss ships an
+    // incomplete package.
+    fs.writeFileSync(path.join(outputDir, 'annotation_status.json'), JSON.stringify(annotationStatus, null, 2), 'utf8');
 
     // ZIP everything
     const zipPath = path.join(outputDir, 'BMB_Dispute_Package.zip');
@@ -1717,6 +1740,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
       })),
       files: generatedFiles.map(f => ({ name: f.name, label: f.label, url: `/download/${sessionId}/${f.name}` })),
       zipUrl: `/download/${sessionId}/BMB_Dispute_Package.zip`,
+      annotation: annotationStatus,
     });
 
   } catch (err) {

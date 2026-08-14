@@ -220,6 +220,7 @@ Views._quickResults = function (data) {
           </div>`).join('')}
       </div>
     </div>` : ''}
+    ${annotationPanel(data.annotation)}
     <div class="download-area">
       <a class="btn btn-primary btn-download" id="zipDownload" href="${esc(data.zipUrl)}" download>⬇ Download Full Dispute Package (.zip)</a>
       <div class="file-links" id="quickFileLinks">
@@ -251,6 +252,39 @@ let roundState = null;
    doesn't match the ID is NOT an error on its own — only the consumer knows
    which addresses were never theirs. Every address gets a yes/no, and only a
    "no" becomes a dispute item. */
+// The annotated report is a mailed enclosure — the letter and the Markup Map
+// both point the reader at the red boxes. When a file produced no boxes (or
+// annotation failed outright) the package is incomplete, so say it here rather
+// than leaving it in the server console.
+function annotationPanel(annotation) {
+  if (!Array.isArray(annotation) || annotation.length === 0) return '';
+  const bad = annotation.filter(a => a.method === 'failed' || a.located === 0);
+  const partial = annotation.filter(a => a.located > 0 && a.missed && a.missed.length > 0);
+  const weak = annotation.filter(a => a.weak && a.weak.length > 0);
+  if (bad.length === 0 && partial.length === 0 && weak.length === 0) return '';
+
+  const rows = [
+    ...bad.map(a => `<li><strong>${esc(a.file)}</strong> — no red boxes were placed, so no marked-up copy was produced.${
+      a.error ? ` (${esc(a.error)})` : ''}${
+      a.ocrError ? ` OCR fallback unavailable: ${esc(a.ocrError)}` : ''}</li>`),
+    ...partial.map(a => `<li><strong>${esc(a.file)}</strong> — ${a.located} of ${a.totalItems} items boxed; item${
+      a.missed.length > 1 ? 's' : ''} ${a.missed.join(', ')} could not be located on the page.</li>`),
+    ...weak.map(a => `<li><strong>${esc(a.file)}</strong> — item${a.weak.length > 1 ? 's' : ''} ${a.weak.join(', ')} ${
+      a.weak.length > 1 ? 'are' : 'is'} boxed at the account heading, not on a field: the disputed field is absent from the report, so there is nothing to circle.</li>`),
+  ].join('');
+
+  const level = bad.length ? 'missing' : (partial.length ? 'incomplete' : 'partly approximate');
+  return `
+    <div style="margin:16px 0;padding:14px;border:2px solid ${bad.length ? '#dc2626' : '#f59e0b'};border-radius:12px;background:${bad.length ? '#fef2f2' : '#fffbeb'}">
+      <div style="font-weight:700;font-size:15px">Markup of the credit report is ${level}</div>
+      <ul style="font-size:13px;color:#475569;margin:8px 0 0 18px">${rows}</ul>
+      <p style="font-size:13px;color:#475569;margin-top:8px">
+        The letter says circled report pages are enclosed. Check the marked-up copy before mailing${
+          bad.length ? ', and re-run the analysis if it never appeared' : ''}.
+      </p>
+    </div>`;
+}
+
 function addressPanel(violationsData, addr) {
   const consumer = (violationsData && violationsData.consumer) || {};
   const list = addr.addresses || [];
@@ -415,6 +449,7 @@ Views.round = async function (campaignId, roundId) {
       <a href="#/campaign/${campaignId}" class="btn-link">← Campaign</a>
       <h2 class="card-title" style="margin-top:8px">Round ${round.round_number} — review &amp; approve</h2>
       <p class="card-sub">Check the two boxes for every account you're keeping in the letter (uncheck to drop the account). Edit any wording. Then approve — the final letters are regenerated from exactly what you see here.</p>
+      ${annotationPanel(rv.annotation)}
       ${addressPanel(rv.violationsData, addr)}
       ${accountsHtml || '<p style="color:#64748b;font-style:italic">No violations in this analysis.</p>'}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px">

@@ -45,7 +45,8 @@ identity-docs.js     Photo ID + proof-of-address scans: PDF→PNG normalization,
                      header dimension reader (no image dependency)
 cra-addresses.js     Single source of truth for CRA dispute addresses
 pdf-annotator.js     Red-box annotation of the report copy (text layer / OCR / model bbox)
-ocr_words.py         pytesseract word-box helper (needs python + tesseract on PATH)
+ocr_words.py         pytesseract word-box helper for image snapshots
+ocr_pdf_pages.py     pytesseract per-page word boxes for SCANNED PDFs (no text layer)
 render_pdf_pages.py  pymupdf PDF→PNG page renderer (identity documents)
 public/              Vanilla-JS SPA: js/api.js, js/router.js, js/views/{clients,campaign,
                      round,intake,chronology}.js — hash-routed, no build step
@@ -77,6 +78,13 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
 
 - Letters are organized by furnisher; item numbers are global across the letter and match
   the Markup Map and `violation_items.item_number`.
+- Some bureau PDFs (browser-printed Experian in particular) are **pure page images with no
+  text layer**, so the annotator's text search finds nothing and the marked-up copy comes out
+  empty. `annotateCreditReportPdf` OCRs every page (`ocr_pdf_pages.py`) and feeds the result
+  through the same box-placement path — but only when the text layer is *completely* empty,
+  so a report that already places boxes never changes behavior. When a file still produces no
+  boxes, `annotation_status.json` records it and the round page shows a banner: the annotated
+  report is a mailed enclosure, so a silent miss ships an incomplete package.
 - Deterministic guards in `server.js` inject masked-account-number (§1681g(a)(1)),
   missing-DOFD, and blank-Date-of-Last-Activity violations, then renumber — never remove
   the renumbering pass. The DOLA guard only fires when the uploaded PDF actually prints a
