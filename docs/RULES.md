@@ -229,6 +229,22 @@ number mismatches, and dead-zone sections).
 **C6.** NEVER reintroduce: minimum violation quotas; statutes in mailed
   text; blanket deletes for field errors; 609-letter/magic-letter framing.
 
+**C8. ONE identity block, one date, for every letter in a package.** The
+  consumer's From / Address / Phone / Email / Date of birth / SSN block is
+  built in a single helper (`makeIdentityBlock`) fed by a single server-side
+  builder (`identityFor(client)`), and every mailed letter — dispute, §1681g
+  full-file request, method-of-verification — prints exactly the same block.
+  Two letters out of one run must never disagree; a letter printing blank
+  fill-in lines while its envelope-mate prints the real details is the
+  identity stall the block exists to defeat, self-inflicted. Where the client
+  record genuinely has no value, the fill-in line is correct.
+
+**C9. No placeholder date at the top of a letter.** The mail date is written
+  by hand ONCE, in the "certified mail tracking" block at the foot of every
+  letter. The top date line prints only when a real mail date is known
+  (`options.mailDate`); otherwise it is omitted entirely. Two blanks for the
+  same fact invite two different dates on one letter.
+
 **C7.** Round 2/3 letters are FINAL NOTICE letters built from
   verified-unchanged items only. Rounds cap at 3.
 

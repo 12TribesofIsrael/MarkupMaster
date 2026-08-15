@@ -66,11 +66,17 @@ function makeBody(text, opts = {}) {
   });
 }
 
+// Label/value rows line up on a real tab stop, not on space padding — Times New
+// Roman is proportional, so padEnd() produced a ragged left edge on the values.
+const LABEL_TAB = 1620;   // twips (1.125in) — clears the longest label
+
 function makeLabelValue(label, value) {
   return new Paragraph({
     spacing: { before: 40, after: 40 },
+    tabStops: [{ type: TabStopType.LEFT, position: LABEL_TAB }],
     children: [
-      new TextRun({ text: `${label.padEnd(16)}`, bold: true, size: sz(FONT_BODY), font: FONT }),
+      new TextRun({ text: label, bold: true, size: sz(FONT_BODY), font: FONT }),
+      new TextRun({ children: [new Tab()], size: sz(FONT_BODY), font: FONT }),
       new TextRun({ text: value, size: sz(FONT_BODY), font: FONT }),
     ],
   });
@@ -123,6 +129,67 @@ function makeDoc(children) {
 // Placeholder for identity fields the consumer hasn't typed in yet — the
 // blank renders in the letter so the user fills it in by hand before mailing.
 const idVal = (v, width = 24) => (v && String(v).trim()) || '_'.repeat(width);
+
+// ─── Shared letter head ───────────────────────────────────────────────────────
+//
+// Every mailed letter opens the same way: certified-mail banner, the real mail
+// date (only when one is known — the letter carries a "Date mailed" fill-in at
+// the bottom, so a placeholder date at the top is a second blank for the same
+// fact), the CRA block, then the identity block.
+//
+// The identity block is built ONCE here and used by every letter. It used to be
+// re-typed per generator, which let one letter print the consumer's phone, DOB
+// and SSN while another printed fill-in lines from the same run.
+
+function makeDateLine(mailDate) {
+  const d = mailDate && String(mailDate).trim();
+  if (!d) return [];
+  return [
+    new Paragraph({
+      spacing: { before: 80, after: 80 },
+      children: [new TextRun({ text: d, bold: true, size: sz(FONT_BODY), font: FONT })],
+    }),
+    blank(),
+  ];
+}
+
+function makeCraBlock(cra) {
+  return [
+    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
+    ...(cra.dept ? [makeBody(cra.dept)] : []),
+    makeBody(cra.addr),
+    makeBody(cra.city),
+    blank(),
+  ];
+}
+
+// The consumer's identity block — identical on the dispute letter, the §1681g
+// full-file request and the method-of-verification request. Anything the client
+// record holds is printed; anything it doesn't becomes a fill-in line.
+function makeIdentityBlock(consumer = {}, clientIdentity = {}) {
+  const phone = idVal(clientIdentity.phone, 18)
+    + (clientIdentity.phone2 ? `  /  ${clientIdentity.phone2}` : '');
+  return [
+    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
+    makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
+    makeLabelValue('Phone:', phone),
+    makeLabelValue('Email:', idVal(clientIdentity.email, 24)),
+    makeLabelValue('Date of birth:', idVal(clientIdentity.dob, 14)),
+    makeLabelValue('SSN:', idVal(clientIdentity.ssn, 14)),
+    ...(clientIdentity.formerNames ? [makeLabelValue('Former name(s):', clientIdentity.formerNames)] : []),
+    blank(),
+  ];
+}
+
+// The one place the mail date is recorded by hand, at the foot of every letter.
+function makeTrackingBlock() {
+  return [
+    blank(80),
+    makeBody('For my records — certified mail tracking:', { bold: true }),
+    makeBody('Tracking # (this letter): ________________________________', { indent: true }),
+    makeBody('Date mailed: ____________________   Return receipt received: ____________________', { indent: true }),
+  ];
+}
 
 // Unique, non-null report pages a violation's red boxes land on.
 function markupPages(v) {
@@ -224,8 +291,6 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
   const round = options.round || 1;
   const prior = options.prior || {};
 
-  const dateLine = options.mailDate
-    || '[DATE MAILED — fill in the day you actually mail this letter]';
   const phone = idVal(clientIdentity.phone, 18);
   const email = idVal(clientIdentity.email, 24);
   const proofName = (clientIdentity.proofOfAddress && String(clientIdentity.proofOfAddress).trim())
@@ -234,24 +299,12 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
   const children = [
     makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
     blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: dateLine, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    blank(),
-    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    ...(cra.dept ? [makeBody(cra.dept)] : []),
-    makeBody(cra.addr),
-    makeBody(cra.city),
-    blank(),
+    ...makeDateLine(options.mailDate),
+    ...makeCraBlock(cra),
 
     // Full identity block — anticipates and defeats the "we don't think this
     // is really you" stall letter.
-    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
-    makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
-    makeLabelValue('Phone:', phone + (clientIdentity.phone2 ? `  /  ${clientIdentity.phone2}` : '')),
-    makeLabelValue('Email:', email),
-    makeLabelValue('Date of birth:', idVal(clientIdentity.dob, 14)),
-    makeLabelValue('SSN:', idVal(clientIdentity.ssn, 14)),
-    ...(clientIdentity.formerNames ? [makeLabelValue('Former name(s):', clientIdentity.formerNames)] : []),
-    blank(),
+    ...makeIdentityBlock(consumer, clientIdentity),
 
     makeBody(`RE: Dispute of inaccurate information on my ${consumer.bureau || ''} credit report (report dated ${consumer.reportDate || '[report date]'})`, { bold: true }),
   ];
@@ -339,10 +392,10 @@ async function generateWattsLetterDocx(violationsData, clientIdentity = {}, opti
     children.push(blank(80));
   }
 
-  // Consumer-side record keeping (filled in by hand at the post office).
-  children.push(makeBody('For my records — certified mail tracking:', { bold: true }));
-  children.push(makeBody('Tracking # (this letter): ________________________________', { indent: true }));
-  children.push(makeBody('Date mailed: ____________________   Return receipt received: ____________________', { indent: true }));
+  // Consumer-side record keeping (filled in by hand at the post office) — this
+  // is where the mail date is written, which is why there is no placeholder
+  // date at the top of the letter.
+  children.push(...makeTrackingBlock());
 
   // ID and proof-of-address scans, as the closing pages of the letter.
   children.push(...exhibits.children);
@@ -533,7 +586,7 @@ async function generateLitigationMemoDocx(violationsData, memoContext = {}, outp
 // — if the CRA answers with the standard report instead of the file, that
 // failure itself becomes the §1681g count.
 
-async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputPath) {
+async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputPath, options = {}) {
   const cra = getCRA(consumer.bureau);
   const phone = idVal(clientIdentity.phone, 18);
   const proofName = (clientIdentity.proofOfAddress && String(clientIdentity.proofOfAddress).trim())
@@ -542,20 +595,9 @@ async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputP
   const children = [
     makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
     blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    blank(),
-    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    ...(cra.dept ? [makeBody(cra.dept)] : []),
-    makeBody(cra.addr),
-    makeBody(cra.city),
-    blank(),
-    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
-    makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
-    makeLabelValue('Phone:', phone),
-    makeLabelValue('Email:', idVal(clientIdentity.email, 24)),
-    makeLabelValue('Date of birth:', idVal(clientIdentity.dob, 14)),
-    makeLabelValue('SSN:', idVal(clientIdentity.ssn, 14)),
-    blank(),
+    ...makeDateLine(options.mailDate),
+    ...makeCraBlock(cra),
+    ...makeIdentityBlock(consumer, clientIdentity),
     makeBody('RE: Request for my complete consumer file (full file disclosure)', { bold: true }),
     makeHRule(),
     makeBody('To whom it may concern:'),
@@ -581,9 +623,7 @@ async function generateFileDisclosureDocx(consumer, clientIdentity = {}, outputP
     makeBody('Enclosures:', { bold: true }),
     makeBody(`1.  ${idLabel}${exhibits.attached.includes(idLabel) ? attachedNote : ''}`, { indent: true }),
     makeBody(`2.  ${proofLabel}${exhibits.attached.includes(proofLabel) ? attachedNote : ''}`, { indent: true }),
-    blank(80),
-    makeBody('For my records — certified mail tracking:', { bold: true }),
-    makeBody('Tracking #: ________________________________   Date mailed: ____________________', { indent: true }),
+    ...makeTrackingBlock(),
     ...exhibits.children,
   );
 
@@ -759,24 +799,15 @@ async function generateResultsDiffDocx(diff, outputPath) {
 // three-sentence boilerplate answer becomes evidence of how thin the
 // "investigation" was.
 
-async function generateMovLetterDocx(consumer, clientIdentity = {}, verifiedItems = [], outputPath) {
+async function generateMovLetterDocx(consumer, clientIdentity = {}, verifiedItems = [], outputPath, options = {}) {
   const cra = getCRA(consumer.bureau);
-  const phone = idVal(clientIdentity.phone, 18);
 
   const children = [
     makeBanner('VIA CERTIFIED MAIL — RETURN RECEIPT REQUESTED'),
     blank(),
-    new Paragraph({ spacing: { before: 80, after: 80 }, children: [new TextRun({ text: '[DATE MAILED — fill in the day you actually mail this letter]', bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    blank(),
-    new Paragraph({ spacing: { before: 40, after: 40 }, children: [new TextRun({ text: cra.name, bold: true, size: sz(FONT_BODY), font: FONT })] }),
-    ...(cra.dept ? [makeBody(cra.dept)] : []),
-    makeBody(cra.addr),
-    makeBody(cra.city),
-    blank(),
-    makeLabelValue('From:', consumer.name || '[Consumer Name]'),
-    makeLabelValue('Address:', consumer.address || '[Consumer Address]'),
-    makeLabelValue('Phone:', phone),
-    blank(),
+    ...makeDateLine(options.mailDate),
+    ...makeCraBlock(cra),
+    ...makeIdentityBlock(consumer, clientIdentity),
     makeBody('RE: How did you verify these items?', { bold: true }),
     makeHRule(),
     makeBody('To whom it may concern:'),
@@ -794,6 +825,7 @@ async function generateMovLetterDocx(consumer, clientIdentity = {}, verifiedItem
   children.push(makeBody('_________________________________'));
   children.push(makeBody(consumer.name || '[Consumer Name]', { bold: true }));
   children.push(makeBody(consumer.address || '[Consumer Address]'));
+  children.push(...makeTrackingBlock());
 
   const doc = makeDoc(children);
   const buffer = await Packer.toBuffer(doc);

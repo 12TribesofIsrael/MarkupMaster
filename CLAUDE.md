@@ -136,6 +136,14 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
   assert on their face that both are enclosed — never ship a change that drops the exhibits
   while leaving that sentence in. When a scan is missing, the enclosure stays on the list and
   Mailing_Instructions prints an unchecked box instead of "already printed".
+- Every mailed letter shares one identity block and one date rule (RULES.md C8/C9):
+  `identityFor(client)` in `server.js` is the only builder of `clientIdentity`, and
+  `makeIdentityBlock` in `docx-generator.js` is the only place the From/Address/Phone/
+  Email/DOB/SSN rows are laid out — so the dispute letter, the §1681g request and the
+  MOV request from one run can never disagree. The mail date is a single hand-written
+  fill-in in the tracking block at the foot of each letter; the top date line prints
+  only when a real `options.mailDate` exists. Label/value rows align on a tab stop
+  (`LABEL_TAB`), never on `padEnd` — Times New Roman is proportional.
 - **Address doctrine: a report legitimately carries address history, so an address that does
   not match the ID is NOT a violation.** Never auto-inject an address dispute. `/analyze`
   only *lists* addresses (`consumer.addressesOnReport` + `personalInfoSectionPresent`);

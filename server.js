@@ -496,6 +496,22 @@ function runViolationsPath(run) {
   return path.join(__dirname, 'outputs', path.basename(run.session_uuid), 'violations_data.json');
 }
 
+// The consumer identity block, built in exactly ONE place. Every letter in a
+// package prints the same phone / email / DOB / SSN; building it per-endpoint
+// let one letter carry the real details while another in the same output
+// folder printed blank fill-in lines, which is the identity stall the block
+// exists to defeat.
+function identityFor(client) {
+  if (!client) return {};
+  return {
+    phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
+    dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
+    proofOfAddress: client.proof_of_address || '',
+    idPages: store.clientDocPaths(client, 'id'),
+    proofPages: store.clientDocPaths(client, 'proof'),
+  };
+}
+
 // Everything the litigation memo needs from campaign tracking.
 function memoContextFor(campaignId) {
   const campaign = store.getCampaign(campaignId);
@@ -568,13 +584,7 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
     let itemNo = 0;
     for (const f of data.furnishers) for (const v of (f.violations || [])) v.number = ++itemNo;
 
-    const clientIdentity = client ? {
-      phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
-      dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
-      proofOfAddress: client.proof_of_address || '',
-      idPages: store.clientDocPaths(client, 'id'),
-      proofPages: store.clientDocPaths(client, 'proof'),
-    } : {};
+    const clientIdentity = identityFor(client);
 
     // Round 2/3: recite the prior round's real dates and tracking.
     let prior = {};
@@ -592,7 +602,7 @@ app.post('/api/rounds/:id/generate', requirePin, async (req, res) => {
       path.join(outputDir, 'Litigation_Memo.docx'), path.join(outputDir, 'litigation_memo.json'));
     await generateMarkupMapDocx(data, path.join(outputDir, 'Markup_Map.docx'));
     if (round.round_number === 1) {
-      await generateFileDisclosureDocx(data.consumer, clientIdentity, path.join(outputDir, 'Full_File_Request.docx'));
+      await generateFileDisclosureDocx(data.consumer, clientIdentity, path.join(outputDir, 'Full_File_Request.docx'), options);
     }
     await generateMailingInstructionsDocx(data, path.join(outputDir, 'Mailing_Instructions.docx'), clientIdentity);
 
@@ -794,11 +804,7 @@ app.post('/api/campaigns/:id/intake', requirePin, (req, res, next) => {
     const priorRun = store.getRun(round.run_id);
     const priorData = JSON.parse(fs.readFileSync(runViolationsPath(priorRun), 'utf8'));
     const client = store.getClient(campaign.client_id);
-    const clientIdentity = client ? {
-      phone: client.phone || '', phone2: client.phone_alt || '', email: client.email || '',
-      dob: client.dob || '', ssn: client.ssn || '', formerNames: client.former_names || '',
-      proofOfAddress: client.proof_of_address || '',
-    } : {};
+    const clientIdentity = identityFor(client);
 
     // Verified-unchanged items feed the next round (max 3) — and an optional
     // plain-language MOV request (supporting exhibit, never the case).
@@ -1631,13 +1637,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
     // used by the campaign-less quick flow.
     const analyzeCampaign = store.getCampaign(Number(req.body.campaignId) || 0);
     const analyzeClient = analyzeCampaign ? store.getClient(analyzeCampaign.client_id) : null;
-    const clientIdentity = analyzeClient ? {
-      phone: analyzeClient.phone || '', phone2: analyzeClient.phone_alt || '', email: analyzeClient.email || '',
-      dob: analyzeClient.dob || '', ssn: analyzeClient.ssn || '', formerNames: analyzeClient.former_names || '',
-      proofOfAddress: analyzeClient.proof_of_address || '',
-      idPages: store.clientDocPaths(analyzeClient, 'id'),
-      proofPages: store.clientDocPaths(analyzeClient, 'proof'),
-    } : {
+    const clientIdentity = analyzeClient ? identityFor(analyzeClient) : {
       phone: req.body.phone || '',
       phone2: req.body.phone2 || '',
       email: req.body.email || '',
@@ -1670,7 +1670,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
 
     // Mailing Instructions docx — pass full structured data
     const mailingPath = path.join(outputDir, 'Mailing_Instructions.docx');
-    await generateMailingInstructionsDocx(violationsData, mailingPath);
+    await generateMailingInstructionsDocx(violationsData, mailingPath, clientIdentity);
     generatedFiles.push({ name: 'Mailing_Instructions.docx', path: mailingPath, label: 'Mailing Instructions' });
 
     // HTML Violation Report
