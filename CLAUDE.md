@@ -18,6 +18,14 @@ corpus in `c:\Users\Claude\Litigation`):
    verified-unchanged / unclear), drafts a FINAL NOTICE round 2/3 from the verified items,
    and maintains the willfulness chronology for litigation
 
+## The brain: docs/RULES.md
+
+`docs/RULES.md` is the single authoritative recipe — the fixed linear sequence and the
+per-account rules (guards, sweep, Watts letter, division of labor). It loads into the
+/analyze system prompt as the governing document, and the deterministic code implements
+it. If code and RULES.md disagree, RULES.md is right and the code is a bug; change both
+in the same commit.
+
 ## The Watts letter doctrine (why the letters look the way they do)
 
 - The **mailed** dispute letter is plain English: no statute citations, no case names, no

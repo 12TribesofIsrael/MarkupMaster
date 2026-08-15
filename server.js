@@ -949,6 +949,15 @@ app.post('/analyze', requirePin, (req, res, next) => {
 ABSOLUTE GROUNDING RULES — VIOLATION OF THESE RULES IS FAILURE
 ═══════════════════════════════════════════════════════════════
 
+0. RULES.md IN THE KNOWLEDGE BASE IS THE GOVERNING DOCUMENT. It defines the
+   linear workflow you are one node of. Where any other knowledge-base file
+   conflicts with RULES.md, RULES.md wins. Your role is Section D "Model":
+   you are ADDITIVE ONLY — you report accounts, field values, and judgment
+   findings; a deterministic pass after you independently reads every account
+   heading off the paper, injects the guard items, and places every box. You
+   cannot remove an account and you must not try to enumerate boxes — report
+   what is wrong and where, per RULES.md sections A–C.
+
 1. ONLY report data you can LITERALLY READ from the credit report images. Every value you output (account numbers, balances, dates, amounts, statuses) MUST be directly visible in the uploaded images.
 
 2. If a field is NOT VISIBLE or NOT PRESENT in the images, you MUST return null for that field. NEVER estimate, infer, calculate, or fabricate any value. A null is always better than a guess.
