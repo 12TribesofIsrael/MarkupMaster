@@ -11,7 +11,8 @@ const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const cookieParser = require('cookie-parser');
 const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx, generateResultsDiffDocx, generateMovLetterDocx } = require('./docx-generator');
-const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes } = require('./pdf-annotator');
+const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes, getPageLines, getImageLines } = require('./pdf-annotator');
+const { sweepPages, injectSweepViolations } = require('./unpopulated-sweep');
 const identityDocs = require('./identity-docs');
 const store = require('./db');
 
@@ -1528,6 +1529,43 @@ If the uploads include the report's first/header pages, read the consumer name, 
       }
     }
 
+    // Guard 5 — the deterministic unpopulated-field sweep (master-markup
+    // doctrine, archetypes in mastermarkups/): scan every uploaded file's own
+    // text for fields the report prints but does not populate — masked account
+    // numbers, blank/dash field values, no-data payment-history cells — and
+    // fold each finding into the violations with its measured rectangle. The
+    // annotator draws those rectangles exactly (strategy 'sweep'), so the boxes
+    // ARE the violations. Extracted lines are reused for annotation below so
+    // OCR runs once per file.
+    const sweepLinesByFile = new Map(); // file.path -> getPageLines/getImageLines result
+    if (violationsData.furnishers && violationsData.furnishers.length) {
+      let sweepImageIndex = 0;
+      for (const file of req.files) {
+        const isPdf = path.extname(file.originalname).toLowerCase() === '.pdf';
+        if (!isPdf) sweepImageIndex++;
+        try {
+          let extracted;
+          if (isPdf) {
+            extracted = await getPageLines(file.path);
+          } else {
+            const dims = identityDocs.imageSize(file.path);
+            if (!dims) continue;
+            extracted = getImageLines(file.path, dims.height);
+          }
+          sweepLinesByFile.set(file.path, { extracted, imageIndex: isPdf ? null : sweepImageIndex });
+          if (!extracted.pages || extracted.pages.every(p => !p.lines.length)) continue;
+          const findings = sweepPages(extracted.pages, violationsData);
+          if (!findings.length) continue;
+          const s = injectSweepViolations(violationsData, findings, file.originalname);
+          console.log(`[${sessionId}] Sweep ${file.originalname}: ${findings.length} unpopulated-field finding(s) — ` +
+            `${s.masked} masked, ${s.anchors} anchors, ${s.blankFields} blank fields, ${s.gridMarks} grid marks, ` +
+            `${s.newItems} new letter item(s)${s.unattributed ? `, ${s.unattributed} outside audited accounts (skipped)` : ''}`);
+        } catch (e) {
+          console.warn(`[${sessionId}] Unpopulated-field sweep failed for ${file.originalname}:`, e.message);
+        }
+      }
+    }
+
     // Recompute summary counts from actual violation severity badges (not Claude's summary)
     if (violationsData.furnishers) {
       let total = 0, critical = 0, high = 0, medium = 0;
@@ -1625,14 +1663,20 @@ If the uploads include the report's first/header pages, read the consumer name, 
         const annotatedName = `Annotated_Credit_Report_${base}.pdf`;
         const annotatedPath = path.join(outputDir, annotatedName);
         let stats;
+        const sweepCached = sweepLinesByFile.get(file.path);
         if (isPdf) {
-          stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath, { scoped: req.files.length > 1 });
+          stats = await annotateCreditReportPdf(file.path, violationsData, annotatedPath, {
+            scoped: req.files.length > 1,
+            precomputed: sweepCached ? sweepCached.extracted : undefined,
+            fileName: file.originalname,
+          });
         } else {
           // Preferred: OCR gives exact word positions, so boxes land by text
           // search just like the PDF path. Model bbox coordinates (plus a
           // self-correction pass) are the fallback when OCR is unavailable.
           try {
-            stats = await annotateImageSnapshotOcr(file.path, violationsData, annotatedPath, imageIndex);
+            stats = await annotateImageSnapshotOcr(file.path, violationsData, annotatedPath, imageIndex,
+              { precomputed: sweepCached ? sweepCached.extracted : undefined, fileName: file.originalname });
             console.log(`[${sessionId}] Snapshot annotated via OCR text search`);
           } catch (ocrErr) {
             console.warn(`[${sessionId}] OCR annotation unavailable (${ocrErr.message}) — using model coordinates`);

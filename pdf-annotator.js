@@ -304,6 +304,27 @@ function findLine(pages, pageHint, cands, boundsFor) {
   return null;
 }
 
+// ── Rotated-scan support ─────────────────────────────────────────────────────
+// Some scans embed the page image sideways (browser-printed Experian reports:
+// landscape content on a portrait page). OCR runs on the rotated-upright
+// rendering so text reads in order, which means every coordinate this module
+// works with lives in UPRIGHT space. A finished box must be mapped back onto
+// the unrotated page before it is drawn. `rotation` is the CCW angle that made
+// the page upright; (pw, ph) are the real page's dimensions in points. Both
+// spaces use PDF bottom-left origins.
+function rectToPage(box, rotation, pw, ph) {
+  switch (rotation) {
+    case 90:
+      return { x: box.y, y: ph - box.x - box.width, width: box.height, height: box.width };
+    case 270:
+      return { x: pw - box.y - box.height, y: box.x, width: box.height, height: box.width };
+    case 180:
+      return { x: pw - box.x - box.width, y: ph - box.y - box.height, width: box.width, height: box.height };
+    default:
+      return box;
+  }
+}
+
 /**
  * Shared matching + drawing core. Finds each markup entry's text in the
  * extracted page lines and draws a red box over the matched items.
@@ -319,6 +340,7 @@ function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}
   const padTop = style.padTop != null ? style.padTop : 2.5;
   const padBottom = style.padBottom != null ? style.padBottom : 2.5;
   const borderWidth = style.lineWidth || 1.4;
+  const fileName = style.fileName || null;
 
   let itemNo = 0;
   let located = 0;
@@ -337,11 +359,38 @@ function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}
         missed.push({ item: itemNo, reason: 'no markup data', text: v.title || '' });
         continue;
       }
-      const marks = allMarks.filter(m => markFilter(m) != null);
+      // Sweep marks carry exact page + rectangle from the deterministic
+      // unpopulated-field sweep, plus the name of the file they were measured
+      // on — they draw only there, bypassing the printed-page mapping.
+      const sweepOk = (m) => m.sweep && Number.isFinite(m.sweep.page) && m.sweep.rect &&
+        (!m.sweep.file || !fileName || m.sweep.file === fileName);
+      const marks = allMarks.filter(m => (m.sweep ? sweepOk(m) : markFilter(m) != null));
       if (marks.length === 0) continue; // this violation's marks live on another file
 
       let anyHit = false;
       for (const m of marks) {
+        if (m.sweep) {
+          const pi = m.sweep.page - 1;
+          if (pi < 0 || pi >= pdfPages.length) continue;
+          const r = m.sweep.rect;
+          let grow = 0;
+          let box;
+          do {
+            box = { x: r.x - grow, y: r.y - grow, width: r.width + grow * 2, height: r.height + grow * 2 };
+            grow += 3;
+          } while (drawnBoxes.some(b => b.p === pi &&
+            Math.abs(b.x - box.x) < 2 && Math.abs(b.y - box.y) < 2 &&
+            Math.abs(b.width - box.width) < 4 && Math.abs(b.height - box.height) < 4));
+          drawnBoxes.push({ p: pi, ...box });
+          const pg = pdfPages[pi];
+          pg.drawRectangle({
+            ...rectToPage(box, (pages[pi] && pages[pi].rotation) || 0, pg.getWidth(), pg.getHeight()),
+            borderColor: RED, borderWidth,
+          });
+          markLog.push({ item: itemNo, page: m.sweep.page, markText: String(m.markText || ''), strategy: 'sweep', placedOnPage: m.sweep.page });
+          anyHit = true;
+          continue;
+        }
         const hint = markFilter(m);
         const clean = sanitizeMarkText(m.markText);
         // Confine the search to this account's block, but only on the page the
@@ -431,7 +480,12 @@ function drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style = {}
           Math.abs(b.x - box.x) < 2 && Math.abs(b.y - box.y) < 2 &&
           Math.abs(b.width - box.width) < 4 && Math.abs(b.height - box.height) < 4));
         drawnBoxes.push({ p: hit.pageIndex, ...box });
-        pg.drawRectangle({ ...box, borderColor: RED, borderWidth });
+        // Boxes are computed in upright (reading-order) space; map onto the
+        // real page, which a sideways scan stores rotated.
+        pg.drawRectangle({
+          ...rectToPage(box, (pages[hit.pageIndex] && pages[hit.pageIndex].rotation) || 0, pg.getWidth(), pg.getHeight()),
+          borderColor: RED, borderWidth,
+        });
       }
 
       if (anyHit) located++;
@@ -480,18 +534,45 @@ function ocrPageLines(inputPdfPath, pageCount) {
   let words = 0;
   for (let i = 0; i < pageCount; i++) {
     const p = byIndex.get(i);
-    if (!p || !p.words || p.words.length === 0) { pages.push({ lines: [] }); continue; }
+    if (!p || !p.words || p.words.length === 0) { pages.push({ lines: [], rotation: 0 }); continue; }
     words += p.words.length;
     // OCR gives origin top-left; the drawing code works in PDF space.
+    // width/height (and therefore these coordinates) are UPRIGHT-space when the
+    // scan was sideways — `rotation` records the CCW angle that fixed it, and
+    // rectToPage maps finished boxes back onto the real page at draw time.
     const items = p.words.map(w => ({
       str: w.t, x: w.x, y: p.height - (w.y + w.h), w: w.w, h: w.h,
     }));
     // OCR baselines jitter more than PDF text runs, so group lines loosely —
     // 5pt is under half a line of report body text.
-    pages.push({ lines: groupIntoLines(items, 5) });
+    pages.push({ lines: groupIntoLines(items, 5), rotation: p.rotation || 0, width: p.width, height: p.height });
   }
   if (words === 0) throw new Error('OCR returned no words');
   return pages;
+}
+
+/**
+ * Extract the searchable line structure for every page of a report PDF: the
+ * text layer when one exists, OCR otherwise (matching annotateCreditReportPdf's
+ * fallback rule exactly). Exported so the server can run the deterministic
+ * unpopulated-field sweep on the same lines the annotator will draw from, and
+ * hand the result back via opts.precomputed — the expensive OCR then runs once
+ * per file instead of twice.
+ */
+async function getPageLines(inputPdfPath) {
+  const buffer = fs.readFileSync(inputPdfPath);
+  let pages = await extractPageLines(buffer);
+  let method = 'text-layer';
+  let ocrError = null;
+  if (pages.every(p => p.lines.length === 0)) {
+    try {
+      pages = ocrPageLines(inputPdfPath, pages.length);
+      method = 'ocr';
+    } catch (e) {
+      ocrError = e.message;
+    }
+  }
+  return { pages, method, ocrError };
 }
 
 /**
@@ -507,22 +588,10 @@ function ocrPageLines(inputPdfPath, pageCount) {
  */
 async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath, opts = {}) {
   const buffer = fs.readFileSync(inputPdfPath);
-  let pages = await extractPageLines(buffer);
-
   // Scanned report: no text layer anywhere in the file, so there is nothing to
-  // search. Fall back to OCR. Deliberately only when the text layer is
-  // completely empty — a report that already places boxes must not change
-  // behavior just because a few items missed.
-  let method = 'text-layer';
-  let ocrError = null;
-  if (pages.every(p => p.lines.length === 0)) {
-    try {
-      pages = ocrPageLines(inputPdfPath, pages.length);
-      method = 'ocr';
-    } catch (e) {
-      ocrError = e.message;
-    }
-  }
+  // search — getPageLines falls back to OCR. `opts.precomputed` (the server's
+  // sweep already extracted the lines) skips doing that work a second time.
+  const { pages, method, ocrError } = opts.precomputed || await getPageLines(inputPdfPath);
 
   const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
   const pdfPages = pdfDoc.getPages();
@@ -562,6 +631,7 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath,
   // OCR word boxes hug the glyphs tighter and wobble a little, so give the
   // boxes a touch more room than the text-layer path uses.
   const style = method === 'ocr' ? { padX: 3.5, padTop: 3.5, padBottom: 4 } : {};
+  style.fileName = opts.fileName || path.basename(inputPdfPath);
   const stats = drawMarkupBoxes(pages, pdfPages, violationsData, markFilter, style, furnisherFilter);
 
   fs.writeFileSync(outputPath, await pdfDoc.save());
@@ -574,12 +644,7 @@ async function annotateCreditReportPdf(inputPdfPath, violationsData, outputPath,
  * logic the PDF mode uses — no model coordinates involved. Throws if the OCR
  * engine is unavailable; callers fall back to annotateImageSnapshot.
  */
-async function annotateImageSnapshotOcr(imagePath, violationsData, outputPath, imageIndex = 1) {
-  const raw = execFileSync('python', [path.join(__dirname, 'ocr_words.py'), imagePath],
-    { maxBuffer: 32 * 1024 * 1024, timeout: 60000 }).toString();
-  const words = JSON.parse(raw);
-  if (!Array.isArray(words) || words.length === 0) throw new Error('OCR returned no words');
-
+async function annotateImageSnapshotOcr(imagePath, violationsData, outputPath, imageIndex = 1, opts = {}) {
   const bytes = fs.readFileSync(imagePath);
   const pdfDoc = await PDFDocument.create();
   const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
@@ -588,17 +653,34 @@ async function annotateImageSnapshotOcr(imagePath, violationsData, outputPath, i
   const page = pdfDoc.addPage([width, height]);
   page.drawImage(img, { x: 0, y: 0, width, height });
 
-  // OCR pixel coords (origin top-left) → page coords (origin bottom-left).
-  // OCR baselines jitter more than PDF text runs, so group lines loosely.
-  const items = words.map(w => ({ str: w.t, x: w.x, y: height - (w.y + w.h), w: w.w, h: w.h }));
-  const pages = [{ lines: groupIntoLines(items, 7) }];
+  const pages = (opts.precomputed && opts.precomputed.pages) || getImageLines(imagePath, height).pages;
 
   const stats = drawMarkupBoxes(pages, [page], violationsData,
     m => ((m.page || 1) === imageIndex ? 1 : null),
-    { padX: Math.max(4, width * 0.004), padTop: 4, padBottom: 5, lineWidth: Math.max(1.5, width / 450) });
+    {
+      padX: Math.max(4, width * 0.004), padTop: 4, padBottom: 5, lineWidth: Math.max(1.5, width / 450),
+      fileName: opts.fileName || path.basename(imagePath),
+    });
 
   fs.writeFileSync(outputPath, await pdfDoc.save());
   return stats;
+}
+
+/**
+ * OCR a snapshot image into the same { pages } line structure getPageLines
+ * produces, in image-pixel units with a bottom-left origin (the snapshot is
+ * embedded at native size, so pixels ARE page points). Throws when the OCR
+ * engine is unavailable — image-sweep callers treat that as "no findings".
+ */
+function getImageLines(imagePath, imageHeight) {
+  const raw = execFileSync('python', [path.join(__dirname, 'ocr_words.py'), imagePath],
+    { maxBuffer: 32 * 1024 * 1024, timeout: 60000 }).toString();
+  const words = JSON.parse(raw);
+  if (!Array.isArray(words) || words.length === 0) throw new Error('OCR returned no words');
+  // OCR pixel coords (origin top-left) → page coords (origin bottom-left).
+  // OCR baselines jitter more than PDF text runs, so group lines loosely.
+  const items = words.map(w => ({ str: w.t, x: w.x, y: imageHeight - (w.y + w.h), w: w.w, h: w.h }));
+  return { pages: [{ lines: groupIntoLines(items, 7), rotation: 0 }], method: 'ocr' };
 }
 
 /**
@@ -745,4 +827,8 @@ async function refineSnapshotBoxes(anthropic, imagePath, annotatedPdfPath, viola
   return applied;
 }
 
-module.exports = { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes };
+module.exports = {
+  annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes,
+  // Shared plumbing for the deterministic unpopulated-field sweep
+  getPageLines, getImageLines, normalize, groupIntoLines, buildNameSet, buildAccountHeadings, accountBounds, linesIn,
+};

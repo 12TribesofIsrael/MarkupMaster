@@ -7,3 +7,6 @@ data/
 Reports/
 input/
 docs/Markup_Example/
+
+# Master markup archetypes — real consumer reports (PII); canon lives on disk only
+mastermarkups/

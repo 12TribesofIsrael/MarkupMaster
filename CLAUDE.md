@@ -87,7 +87,20 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
   report is a mailed enclosure, so a silent miss ships an incomplete package.
 - Deterministic guards in `server.js` inject masked-account-number (§1681g(a)(1)),
   missing-DOFD, and blank-Date-of-Last-Activity violations, then renumber — never remove
-  the renumbering pass. The DOLA guard only fires when the uploaded PDF actually prints a
+  the renumbering pass.
+- **Master-markup doctrine (`mastermarkups/` holds the two archetype reports):** anything
+  the report prints but does not populate gets a red box, and every box corresponds to a
+  letter item. `unpopulated-sweep.js` runs after the guards on every uploaded file's own
+  text (text layer or OCR): masked account numbers, account-identity anchor rows,
+  blank/dash field values, TransUnion `---` payment-history columns/blocks, Experian `ND`
+  cells and in-window dash runs. Findings attach measured rectangles (`markup[].sweep`) to
+  existing items or inject grouped per-account items; the annotator draws those rects
+  verbatim (strategy `sweep`) — no model judgment anywhere in that path. Verify changes
+  against the archetypes by rendering, not by counts.
+- Rotated scans (browser-printed Experian: landscape content on portrait pages) are
+  auto-uprighted by `ocr_pdf_pages.py` (tesseract OSD + yield check); all matching happens
+  in upright space and `rectToPage` maps boxes back at draw time. The OCR also merges a
+  psm 11 sparse pass — that is what recovers faint bare labels like a blank "Phone" row. The DOLA guard only fires when the uploaded PDF actually prints a
   "Date of Last Activity" label (Equifax does, the others often don't), so it never boxes a
   field that isn't there.
 - Date of Last Activity is **not** an FCRA-required field (Watts). Never plead a blank DOLA as
