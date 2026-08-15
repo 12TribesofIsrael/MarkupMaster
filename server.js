@@ -12,7 +12,7 @@ const pdfParse = require('pdf-parse');
 const cookieParser = require('cookie-parser');
 const { generateWattsLetterDocx, generateLitigationMemoDocx, generateFileDisclosureDocx, generateMailingInstructionsDocx, generateMarkupMapDocx, generateResultsDiffDocx, generateMovLetterDocx } = require('./docx-generator');
 const { annotateCreditReportPdf, annotateImageSnapshot, annotateImageSnapshotOcr, refineSnapshotBoxes, getPageLines, getImageLines } = require('./pdf-annotator');
-const { sweepPages, injectSweepViolations } = require('./unpopulated-sweep');
+const { sweepPages, injectSweepViolations, extractAccountRoster, mergeRosterIntoViolations } = require('./unpopulated-sweep');
 const identityDocs = require('./identity-docs');
 const store = require('./db');
 
@@ -1400,6 +1400,41 @@ If the uploads include the report's first/header pages, read the consumer name, 
       }
     }
 
+    // Deterministic account roster — the report itself prints every account
+    // heading, so the list of accounts to audit comes from the paper, not the
+    // model. Any printed account the model failed to list is added here BEFORE
+    // the guards, so it still receives its masked-number item, its blank-field
+    // and payment-history sweep boxes, and its letter items. The model can add
+    // judgment items on top; it can no longer make an account disappear.
+    const sweepLinesByFile = new Map(); // file.path -> { extracted, imageIndex }
+    {
+      let rosterImageIndex = 0;
+      for (const file of req.files) {
+        const isPdf = path.extname(file.originalname).toLowerCase() === '.pdf';
+        if (!isPdf) rosterImageIndex++;
+        try {
+          let extracted;
+          if (isPdf) {
+            extracted = await getPageLines(file.path);
+          } else {
+            const dims = identityDocs.imageSize(file.path);
+            if (!dims) continue;
+            extracted = getImageLines(file.path, dims.height);
+          }
+          sweepLinesByFile.set(file.path, { extracted, imageIndex: isPdf ? null : rosterImageIndex });
+          if (!extracted.pages || extracted.pages.every(p => !p.lines.length)) continue;
+          const roster = extractAccountRoster(extracted.pages);
+          const added = mergeRosterIntoViolations(violationsData, roster);
+          if (added.length) {
+            console.log(`[${sessionId}] Roster ${file.originalname}: report prints ${roster.length} account heading(s); ` +
+              `model missed ${added.length}: ${added.map(a => `${a.name} (p${a.page}, ${a.section})`).join('; ')}`);
+          }
+        } catch (e) {
+          console.warn(`[${sessionId}] Account roster extraction failed for ${file.originalname}:`, e.message);
+        }
+      }
+    }
+
     // Deterministic guards — enforce the highlighting rules even when the model slips.
     if (violationsData.furnishers) {
       for (const f of violationsData.furnishers) {
@@ -1464,6 +1499,9 @@ If the uploads include the report's first/header pages, read the consumer name, 
         // violation — category 9, always-flag per the BMB protocol.
         for (const acct of accounts) {
           if (acct.dofd) continue;
+          // DOFD is only required on derogatory accounts — a roster-added
+          // account from the satisfactory section never gets this item.
+          if (acct._rosterAdded && acct._rosterSection !== 'adverse') continue;
           const has = violations.some(v =>
             v.accountName === acct.accountName &&
             /DOFD|(FIRST|1ST) DELINQUENCY/i.test(String(v.title || '')));
@@ -1497,6 +1535,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
         if (reportPrintsDolaLabel) {
           for (const acct of accounts) {
             if (acct.dateLastActive) continue;
+            if (acct._rosterAdded && acct._rosterSection !== 'adverse') continue;
             const has = violations.some(v =>
               v.accountName === acct.accountName &&
               /LAST ACTIVITY/i.test(String(v.title || '')));
@@ -1535,26 +1574,13 @@ If the uploads include the report's first/header pages, read the consumer name, 
     // numbers, blank/dash field values, no-data payment-history cells — and
     // fold each finding into the violations with its measured rectangle. The
     // annotator draws those rectangles exactly (strategy 'sweep'), so the boxes
-    // ARE the violations. Extracted lines are reused for annotation below so
-    // OCR runs once per file.
-    const sweepLinesByFile = new Map(); // file.path -> getPageLines/getImageLines result
+    // ARE the violations. Page lines were extracted once in the roster pass.
     if (violationsData.furnishers && violationsData.furnishers.length) {
-      let sweepImageIndex = 0;
       for (const file of req.files) {
-        const isPdf = path.extname(file.originalname).toLowerCase() === '.pdf';
-        if (!isPdf) sweepImageIndex++;
+        const cached = sweepLinesByFile.get(file.path);
+        if (!cached || !cached.extracted.pages || cached.extracted.pages.every(p => !p.lines.length)) continue;
         try {
-          let extracted;
-          if (isPdf) {
-            extracted = await getPageLines(file.path);
-          } else {
-            const dims = identityDocs.imageSize(file.path);
-            if (!dims) continue;
-            extracted = getImageLines(file.path, dims.height);
-          }
-          sweepLinesByFile.set(file.path, { extracted, imageIndex: isPdf ? null : sweepImageIndex });
-          if (!extracted.pages || extracted.pages.every(p => !p.lines.length)) continue;
-          const findings = sweepPages(extracted.pages, violationsData);
+          const findings = sweepPages(cached.extracted.pages, violationsData);
           if (!findings.length) continue;
           const s = injectSweepViolations(violationsData, findings, file.originalname);
           console.log(`[${sessionId}] Sweep ${file.originalname}: ${findings.length} unpopulated-field finding(s) — ` +
@@ -1710,6 +1736,7 @@ If the uploads include the report's first/header pages, read the consumer name, 
           weak,
           method: stats.method || (isPdf ? 'text-layer' : 'snapshot'),
           ocrError: stats.ocrError || null,
+          marksPlaced: [...new Set((stats.marks || []).filter(m => m.placedOnPage).map(m => m.item))],
         });
         if (stats.located > 0) {
           generatedFiles.push({ name: annotatedName, path: annotatedPath, label: `Annotated Credit Report (red boxes) — ${file.originalname}` });
@@ -1722,6 +1749,44 @@ If the uploads include the report's first/header pages, read the consumer name, 
       } catch (e) {
         console.warn(`[${sessionId}] Annotation failed for ${file.originalname}:`, e.message);
         annotationStatus.push({ file: file.originalname, located: 0, totalItems: 0, missed: [], method: 'failed', error: e.message });
+      }
+    }
+    // Deterministic coverage check — the final node of the pipeline: every
+    // account in the audit (model-listed or roster-added) must have at least
+    // one red box actually placed for its items across the uploaded files.
+    // An account whose items all failed to land is exactly the "missed
+    // account" failure mode, and it must be loud, not a console line.
+    {
+      const placedItems = new Set();
+      for (const st of annotationStatus) {
+        for (const m of (st.marksPlaced || [])) placedItems.add(m);
+      }
+      let itemNo = 0;
+      const accounts = new Map(); // accountName|furnisher -> { items: [], name }
+      for (const f of (violationsData.furnishers || [])) {
+        for (const v of (f.violations || [])) {
+          itemNo++;
+          const key = `${f.name} — ${v.accountName || f.name}`;
+          if (!accounts.has(key)) accounts.set(key, []);
+          accounts.get(key).push(itemNo);
+        }
+      }
+      const unboxedAccounts = [...accounts.entries()]
+        .filter(([, items]) => !items.some(i => placedItems.has(i)))
+        .map(([key]) => key);
+      annotationStatus.push({
+        file: '(account coverage)',
+        method: 'coverage',
+        located: accounts.size - unboxedAccounts.length,
+        totalItems: accounts.size,
+        missed: [],
+        weak: [],
+        unboxedAccounts,
+      });
+      if (unboxedAccounts.length) {
+        console.warn(`[${sessionId}] COVERAGE: ${unboxedAccounts.length} account(s) have letter items but no placed box: ${unboxedAccounts.join('; ')}`);
+      } else {
+        console.log(`[${sessionId}] Coverage: all ${accounts.size} audited account(s) have at least one placed box.`);
       }
     }
     // A missing markup copy must be visible in the app, not just in the console

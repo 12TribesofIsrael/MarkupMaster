@@ -258,12 +258,18 @@ let roundState = null;
 // than leaving it in the server console.
 function annotationPanel(annotation) {
   if (!Array.isArray(annotation) || annotation.length === 0) return '';
-  const bad = annotation.filter(a => a.method === 'failed' || a.located === 0);
-  const partial = annotation.filter(a => a.located > 0 && a.missed && a.missed.length > 0);
-  const weak = annotation.filter(a => a.weak && a.weak.length > 0);
-  if (bad.length === 0 && partial.length === 0 && weak.length === 0) return '';
+  const files = annotation.filter(a => a.method !== 'coverage');
+  const bad = files.filter(a => a.method === 'failed' || a.located === 0);
+  const partial = files.filter(a => a.located > 0 && a.missed && a.missed.length > 0);
+  const weak = files.filter(a => a.weak && a.weak.length > 0);
+  // Account coverage: every audited account must have at least one placed box.
+  const uncovered = annotation
+    .filter(a => a.method === 'coverage' && a.unboxedAccounts && a.unboxedAccounts.length)
+    .flatMap(a => a.unboxedAccounts);
+  if (bad.length === 0 && partial.length === 0 && weak.length === 0 && uncovered.length === 0) return '';
 
   const rows = [
+    ...uncovered.map(name => `<li><strong>${esc(name)}</strong> — this account has letter items but NO red box was placed anywhere on the report. Do not mail until this is resolved.</li>`),
     ...bad.map(a => `<li><strong>${esc(a.file)}</strong> — no red boxes were placed, so no marked-up copy was produced.${
       a.error ? ` (${esc(a.error)})` : ''}${
       a.ocrError ? ` OCR fallback unavailable: ${esc(a.ocrError)}` : ''}</li>`),
@@ -273,9 +279,9 @@ function annotationPanel(annotation) {
       a.weak.length > 1 ? 'are' : 'is'} boxed at the account heading, not on a field: the disputed field is absent from the report, so there is nothing to circle.</li>`),
   ].join('');
 
-  const level = bad.length ? 'missing' : (partial.length ? 'incomplete' : 'partly approximate');
+  const level = (bad.length || uncovered.length) ? 'missing' : (partial.length ? 'incomplete' : 'partly approximate');
   return `
-    <div style="margin:16px 0;padding:14px;border:2px solid ${bad.length ? '#dc2626' : '#f59e0b'};border-radius:12px;background:${bad.length ? '#fef2f2' : '#fffbeb'}">
+    <div style="margin:16px 0;padding:14px;border:2px solid ${(bad.length || uncovered.length) ? '#dc2626' : '#f59e0b'};border-radius:12px;background:${(bad.length || uncovered.length) ? '#fef2f2' : '#fffbeb'}">
       <div style="font-weight:700;font-size:15px">Markup of the credit report is ${level}</div>
       <ul style="font-size:13px;color:#475569;margin:8px 0 0 18px">${rows}</ul>
       <p style="font-size:13px;color:#475569;margin-top:8px">

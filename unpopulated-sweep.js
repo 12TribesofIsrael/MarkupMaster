@@ -270,6 +270,139 @@ function buildOwnership(pages, nameIndex) {
   return { sortedLines, ownerOf: (pi, li) => ownerAt[pi][li], owners };
 }
 
+// ── Deterministic account roster ─────────────────────────────────────────────
+// The report itself prints every account it contains — a heading line of
+// name + (masked) number on TransUnion, an "Account Name <name>" label row on
+// Experian. Reading those is pattern matching, not judgment, so the roster of
+// accounts to audit comes from the paper, never from the model. The model can
+// ADD narrative items on top; it can no longer make an account disappear by
+// failing to list it.
+const TU_HEADING = /^([a-z0-9 .,'&()\/#-]{4,48}?) ([a-z]{0,4}[0-9x*"'“”‘’`´°]{6,})$/i;
+
+// A heading's number token must be substantial: a real account number (8+
+// digits) or a masked one (2+ mask characters). Grid cells — balances like
+// "70478", years like "2026" — never qualify.
+function isAccountNumberToken(tok) {
+  const t = String(tok || '').replace(/["'“”‘’`´°]/g, '*');
+  return (t.match(/[x*]/gi) || []).length >= 2 || digitsOf(t).length >= 8;
+}
+
+// A heading's name must read like a creditor: real words, not a row of grid
+// values, a field label, or a month header.
+const NAME_BLOCKLIST = /^(balance|past due|remarks|rating|payment received|amount paid|scheduled payment|high balance|credit limit|total months|date|phone|address|account|estimated|page)\b/;
+const MONTH_WORD = new RegExp(`\\b(${MONTHS.join('|')})\\b`, 'g');
+
+function isCreditorName(name) {
+  const n = cmp(name);
+  if (n.length < 4 || NAME_BLOCKLIST.test(n)) return false;
+  const alpha = (n.match(/[a-z]/g) || []).length;
+  if (alpha < 4) return false;                       // mostly digits = grid row
+  if ((n.match(MONTH_WORD) || []).length >= 1 && /\b(19|20)\d{2}\b/.test(n)) return false; // month header
+  if (n.split(' ').length > 6) return false;
+  return true;
+}
+
+function extractAccountRoster(pages) {
+  const roster = [];
+  const seen = new Set();
+  let section = 'adverse';
+  let deadZone = false;
+  const push = (name, number, page) => {
+    const key = cmp(name) + '|' + digitsOf(number).slice(0, 10);
+    if (cmp(name).length < 4 || seen.has(key)) return;
+    seen.add(key);
+    roster.push({ name: name.trim(), number: (number || '').trim() || null, page, section });
+  };
+
+  for (let pi = 0; pi < pages.length; pi++) {
+    const lines = [...pages[pi].lines].sort((a, b) => b.y - a.y);
+    for (const L of lines) {
+      const t = L.text;
+      // Section markers are short header lines; prose like "…reported with no
+      // adverse information…" must not flip the section back.
+      if (/inquir(y|ies)|public record|consumer statement/.test(t) && t.length < 60) { deadZone = true; continue; }
+      if (/adverse information|potentially negative/.test(t) && t.length < 60) { deadZone = false; section = 'adverse'; continue; }
+      if (/satisfactory accounts|good standing|account history/.test(t) && t.length < 60) { deadZone = false; section = 'satisfactory'; continue; }
+      if (deadZone) continue;
+
+      // Experian: "account name <NAME>" label row (value may run into the
+      // next column — cut at a known right-column label).
+      const an = cmp(t).match(/^account name (.+)$/);
+      if (an) {
+        const name = an[1].replace(/ balance.*$/, '').replace(/ (date opened|status|account type).*$/, '');
+        if (isCreditorName(name)) push(name, null, pi + 1);
+        continue;
+      }
+      const num = cmp(t).match(/^account number ([a-z0-9x*]{6,})/);
+      if (num && roster.length && roster[roster.length - 1].number == null) {
+        roster[roster.length - 1].number = num[1];
+        continue;
+      }
+      // TransUnion: the heading IS "NAME 123456789012****"
+      const m = t.match(TU_HEADING);
+      if (m && isCreditorName(m[1]) && isAccountNumberToken(m[2])) {
+        push(m[1], m[2], pi + 1);
+      }
+    }
+  }
+  return roster;
+}
+
+/**
+ * Fold the deterministic roster into violationsData: any printed account the
+ * model failed to list is added (with an empty violation list — the guards
+ * and the sweep then give it its items and boxes). Existing model accounts
+ * are left untouched; matching is by digits, then by name.
+ * Roster-only satisfactory accounts are tagged so the derogatory-only guards
+ * (missing-DOFD) skip them.
+ */
+function mergeRosterIntoViolations(violationsData, roster) {
+  const added = [];
+  violationsData.furnishers = violationsData.furnishers || [];
+  for (const r of roster) {
+    const rDigits = digitsOf(r.number);
+    let hit = null;
+    for (const f of violationsData.furnishers) {
+      for (const a of (f.accounts || [])) {
+        const d = digitsOf(a.accountNumber);
+        const bothNumbered = rDigits.length >= 6 && d.length >= 6;
+        if (bothNumbered) {
+          let k = 0;
+          while (k < d.length && k < rDigits.length && d[k] === rDigits[k]) k++;
+          // Same account = the visible digits agree essentially to the end
+          // (one trailing OCR slip allowed). A shared 6-digit issuer prefix is
+          // NOT identity — ten Nelnet loans all start 900000.
+          if (k >= 6 && k >= Math.min(d.length, rDigits.length) - 1) { hit = a; break; }
+          // Same name but different digits = a DIFFERENT account (the model
+          // often collapses ten same-named student loans into one) — keep
+          // looking; if nothing digit-matches, this roster entry is added.
+          continue;
+        }
+        if (cmp(a.accountName) === cmp(r.name)) { hit = a; break; }
+      }
+      if (hit) break;
+    }
+    if (hit) continue;
+    const name = r.name.toUpperCase();
+    let furnisher = violationsData.furnishers.find(f => cmp(f.name) === cmp(name));
+    if (!furnisher) {
+      furnisher = { name, isCollector: false, accounts: [], violations: [] };
+      violationsData.furnishers.push(furnisher);
+    }
+    furnisher.accounts = furnisher.accounts || [];
+    furnisher.accounts.push({
+      accountName: name,
+      accountNumber: (r.number || 'NOT VISIBLE — heading only').toUpperCase(),
+      dofd: null,
+      dateLastActive: null,
+      _rosterSection: r.section,
+      _rosterAdded: true,
+    });
+    added.push({ name, number: r.number, page: r.page, section: r.section });
+  }
+  return added;
+}
+
 // ── The sweep ────────────────────────────────────────────────────────────────
 /**
  * pages: pdf-annotator line structure ({ lines: [{ y, text, items, ranges }] }).
@@ -961,4 +1094,4 @@ function injectSweepViolations(violationsData, findings, fileName) {
   return summary;
 }
 
-module.exports = { sweepPages, injectSweepViolations };
+module.exports = { sweepPages, injectSweepViolations, extractAccountRoster, mergeRosterIntoViolations };
