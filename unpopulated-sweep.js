@@ -168,6 +168,12 @@ function buildOwnership(pages, nameIndex) {
   const ownerAt = sortedLines.map(ls => new Array(ls.length).fill(null));
   const owners = [];
   let owner = null;
+  // Inside an inquiries / public-records / personal-info section, creditor
+  // names are inquiry tiles, not account blocks — a "JPMCB CARD" there must
+  // not reopen ownership. The zone ends at the next accounts-side marker.
+  let deadZone = false;
+  const DEAD_ZONE = /inquir(y|ies)|public record|personal information|consumer statement/;
+  const LIVE_ZONE = /adverse information|satisfactory accounts|account info\b|account history|potentially negative/;
 
   const openOwner = (entry, numberText) => {
     owner = { key: entry.key, entry, numberText: numberText || null, window: null, headed: true };
@@ -186,6 +192,12 @@ function buildOwnership(pages, nameIndex) {
       const L = sortedLines[pi][li];
       const cmpText = cmp(L.text);
 
+      if (DEAD_ZONE.test(L.text)) { deadZone = true; owner = null; continue; }
+      if (deadZone) {
+        if (LIVE_ZONE.test(L.text)) deadZone = false;
+        else continue;
+      }
+
       const head = headingEntry(L.text, nameIndex);
       if (head) {
         const numTok = L.text.slice(head.key.length).trim().split(' ')[0] || null;
@@ -197,6 +209,11 @@ function buildOwnership(pages, nameIndex) {
         const rest = L.text.replace(/^.*?account name/i, '').trim();
         const e = headingEntry(rest, nameIndex);
         if (e) { openOwner(e, null); ownerAt[pi][li] = owner; continue; }
+        // A real account block whose name is NOT in the audit — a
+        // good-standing tradeline. Experian headings carry no number, so
+        // this label row is the only reliable close signal.
+        owner = null;
+        continue;
       }
       if (SECTION_BREAK.test(L.text) || (owner && looksLikeForeignHeading(L.text))) {
         owner = null;
@@ -690,8 +707,11 @@ function resolveAccount(owner) {
   const f = owner.entry.furnisher;
   const named = (f.accounts || []).filter(a => normalize(a.accountName) === owner.key);
   const cands = named.length ? named : (f.accounts || []);
-  if (cands.length === 1) return { furnisher: f, account: cands[0] };
   const blockDigits = digitsOf(owner.numberText);
+  // The block printed its own account number: it must agree with the audited
+  // account's digits. A same-named tradeline with a different number is a
+  // different (good-standing, unaudited) account — never box it under the
+  // audited one's letter items.
   if (blockDigits.length >= 4) {
     let best = null, bestLen = 3;
     for (const a of cands) {
@@ -700,7 +720,7 @@ function resolveAccount(owner) {
       while (k < d.length && k < blockDigits.length && d[k] === blockDigits[k]) k++;
       if (k > bestLen) { bestLen = k; best = a; }
     }
-    if (best) return { furnisher: f, account: best };
+    return { furnisher: f, account: best };
   }
   return { furnisher: f, account: cands[0] || null };
 }
