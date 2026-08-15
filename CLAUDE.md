@@ -97,6 +97,13 @@ report copies · `BMB_Dispute_Package.zip`. Intake adds `Results_Diff.docx` and
   existing items or inject grouped per-account items; the annotator draws those rects
   verbatim (strategy `sweep`) — no model judgment anywhere in that path. Verify changes
   against the archetypes by rendering, not by counts.
+- **The account roster is deterministic too:** `extractAccountRoster` reads every printed
+  account heading from the report's own text and `mergeRosterIntoViolations` adds any
+  account the model failed to list before the guards run — the model can add judgment
+  items but can never make an account disappear. A coverage node then requires every
+  audited account to end the run with ≥1 placed box (red do-not-mail banner otherwise).
+  Digit identity between roster and model accounts needs near-full prefix agreement — a
+  shared 6-digit issuer prefix is not identity (ten Nelnet loans all start 900000).
 - Rotated scans (browser-printed Experian: landscape content on portrait pages) are
   auto-uprighted by `ocr_pdf_pages.py` (tesseract OSD + yield check); all matching happens
   in upright space and `rectToPage` maps boxes back at draw time. The OCR also merges a
