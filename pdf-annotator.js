@@ -115,12 +115,18 @@ function candidatesFor(markText) {
     }
   }
 
-  // Progressive fallbacks: leading words of each candidate (labels often wrap
-  // across text runs in the PDF, so the full phrase may not sit on one line)
+  // Progressive fallback: leading words of each candidate (labels often wrap
+  // across text runs in the PDF, so the full phrase may not sit on one line).
+  // Three words minimum, eight characters minimum — a two-word prefix like
+  // "date of" matches "Date of Birth" and section prose ("…from the date of
+  // the delinquency…"), planting boxes on text that is not the disputed
+  // field. Identity fields and prose are NEVER boxed.
   for (const c of [...cands]) {
     const words = c.split(' ');
-    if (words.length > 3) cands.push(words.slice(0, 3).join(' '));
-    if (words.length > 2) cands.push(words.slice(0, 2).join(' '));
+    if (words.length > 3) {
+      const prefix = words.slice(0, 3).join(' ');
+      if (prefix.length >= 8) cands.push(prefix);
+    }
   }
   return [...new Set(cands)].filter(c => c.length >= 4 && !/^\d{1,4}$/.test(c));
 }

@@ -157,7 +157,14 @@ number mismatches, and dead-zone sections).
   actual month-by-month history or confirm in writing none exists.
   Box per unpopulated column; ONE box around the whole month-grid block when
   every column in it is unpopulated (archetype style). The Rating row does
-  not count as population.
+  not count as population, and neither do the layout's other money rows
+  (Scheduled Payment, Amount Paid, Payment Received) — a grid layout adding
+  rows must never suppress the block box.
+  **Whole-history rule (master TransUnion markup): when an account's entire
+  printed history is unpopulated, EVERY block of it is boxed, first month to
+  last — the whole history is marked, never a sample.** The dispute letter
+  states it in plain words: "There is no payment history reported for the
+  following months on this account: <the actual months/ranges>."
 
 **B5. Experian ND cells** ("ND — no data for this period")
 → same grouped item as B4. Always boxed, any position. Adjacent ND cells in
@@ -175,6 +182,19 @@ number mismatches, and dead-zone sections).
   payment-history-gaps finding), the sweep attaches its rectangles to that
   item instead of creating a duplicate. Same-named accounts under one
   furnisher keep separate items, keyed by account digits.
+
+**B8. NEVER-BOX LIST.** These are never boxed, by any layer:
+  - the consumer's identity fields — Social Security Number, Date of Birth,
+    Name, Also Known As (they are the consumer's own data, not violations)
+  - section-intro prose and legends ("Adverse information typically
+    remains…", the payment-history guide, ND/CO legend lines)
+  - inquiry tiles, public-record and personal-info section content (address
+    items come only from the consumer's per-address answers, rule A4)
+  - populated fields (a filled-in DOFD, a printed phone number)
+  Text-search placement must never use a generic fragment (like "date of")
+  that can land on identity fields or prose. When a disputed field's label
+  is absent from the page entirely, the box goes to the ACCOUNT HEADING on
+  the account's own page — nowhere else — and is flagged as weak.
 
 ─────────────────────────────────────────────────────────────────────────────
 ## SECTION C — WATTS LETTER RULES (absolute; violations of these are bugs)

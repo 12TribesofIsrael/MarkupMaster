@@ -58,7 +58,7 @@ const DASH_LABELS = [
 
 const DASH_VALUE = /^[-–—_.]{1,3}$/;      // a printed "-" value (OCR variants included)
 const GRID_DASH = /^[-–—~_.]{1,4}$/;      // a "---" grid cell as OCR reads it
-const LABEL_ECHO = /^(balance|past|due|remarks|rating)$/; // OCR ghost-repeats of grid labels
+const LABEL_ECHO = /^(balance|past|due|remarks|rating|scheduled|payment|amount|paid|received)$/; // OCR ghost-repeats of grid labels
 
 // Masked account number: 349993019196**** / USY72XXXX / ****1234. OCR reads
 // asterisks as quotes and backticks often enough that those count as mask
@@ -382,7 +382,9 @@ function mergeRosterIntoViolations(violationsData, roster) {
       }
       if (hit) break;
     }
-    if (hit) continue;
+    // Stamp the heading's page on matched accounts too — guard-injected marks
+    // use it to search the right page instead of defaulting to page 1.
+    if (hit) { hit._rosterPage = hit._rosterPage || r.page; continue; }
     const name = r.name.toUpperCase();
     let furnisher = violationsData.furnishers.find(f => cmp(f.name) === cmp(name));
     if (!furnisher) {
@@ -396,6 +398,7 @@ function mergeRosterIntoViolations(violationsData, roster) {
       dofd: null,
       dateLastActive: null,
       _rosterSection: r.section,
+      _rosterPage: r.page,
       _rosterAdded: true,
     });
     added.push({ name, number: r.number, page: r.page, section: r.section });
@@ -580,7 +583,10 @@ function mergeVertical(findings, kind, gap) {
 // Past Due / Remarks / Rating label+value line pairs. A column whose three
 // value cells are all missing-or-dashes is unpopulated.
 const MONTH_YEAR = /([a-z]{2,12})[.,]? ?((?:19|20)\d{2})/g;
-const ROW_LABELS = ['balance', 'past due', 'remarks', 'rating'];
+// Every row label any TransUnion grid layout prints. Rows must be recognized
+// even when only balance/past-due/remarks are judged — an unrecognized label
+// row gets mistaken for a value line and suppresses the whole-block box.
+const ROW_LABELS = ['balance', 'past due', 'scheduled payment', 'amount paid', 'payment received', 'remarks', 'rating'];
 
 // "October 2023"-ish columns on a line, with item geometry. OCR misreads
 // month names ("une 2022", "duly 2024"), so the month is fuzzy-matched and an
@@ -638,13 +644,12 @@ function sweepTransUnionGrids(pages, own, nameIndex) {
       }
       if (!rows.balance && !rows['past due']) continue;
 
-      // Judge each column: unpopulated when balance+past due+remarks cells
-      // are all absent or dash-like. Tesseract renders a faint "---" as
-      // nothing at all on all-blank pages, and as short vowel junk ("aaa",
-      // "aia") or ghost repeats of the row labels when real values sit
-      // nearby — all of those count as unpopulated; a real value always
-      // carries a digit or a slash code.
-      const DASH_JUNK = /^[aioe.,'"~_\-–—]{1,4}$/i;
+      // Judge each column by what a REAL value must contain, not by
+      // enumerating junk: tesseract renders a faint "---" as nothing at all,
+      // as vowel junk ("aaa"), or as letter shards ("ne", "oe") depending on
+      // the layout — but a real Balance or Past Due always carries a DIGIT,
+      // and a real Remarks code carries a digit or a / < > character
+      // (DRC/CBG/>PRL<). No digit, no code = unpopulated.
       const colState = cols.map(c => {
         let empty = 0, checked = 0;
         for (const lab of ['balance', 'past due', 'remarks']) {
@@ -654,7 +659,10 @@ function sweepTransUnionGrids(pages, own, nameIndex) {
           const cell = row.valueLines.flatMap(V => V.items)
             .filter(i => i.x + i.w > c.left - 8 && i.x < c.right + 8)
             .filter(i => !LABEL_ECHO.test(i.str.trim().toLowerCase()));
-          if (cell.length === 0 || cell.every(i => GRID_DASH.test(i.str.trim()) || DASH_JUNK.test(i.str.trim()))) empty++;
+          const populated = lab === 'remarks'
+            ? cell.some(i => /[0-9\/<>]/.test(i.str))
+            : cell.some(i => /[0-9]/.test(i.str));
+          if (!populated) empty++;
         }
         return checked > 0 && empty === checked;
       });
@@ -1053,13 +1061,13 @@ function injectSweepViolations(violationsData, findings, fileName) {
           severity: 'HIGH',
           statute: 'FCRA §1681g(a)(1); §1681e(b)',
           issueType: 'Incomplete field',
-          reportShows: `No data in payment history: ${ranges}`,
+          reportShows: `No payment history for: ${ranges}`,
           shouldShow: 'The actual month-by-month payment history for every period the grid prints',
           description: `The payment-history grid for this account prints no information (blank, "---", or "ND" cells) for: ${ranges}. The tradeline reports derogatory status, yet the month-by-month record that would let the consumer verify that status is not disclosed.`,
           impact: 'The consumer cannot reconcile the account\'s claimed delinquencies against an actual payment record.',
           precedent: null,
           demand: 'Report the actual month-by-month payment history for these periods, or state in writing that none exists.',
-          disputeWording: `The payment history for this account shows no information at all for these months: ${ranges}. What is the actual month-by-month history for those periods?`,
+          disputeWording: `There is no payment history reported for the following months on this account: ${ranges}. What is the actual month-by-month history for those months? Please report the complete payment history, or tell me in writing that none exists.`,
           remedyType: 'explain',
           remedyWording: 'Please report the actual payment history for these months, or confirm in writing that no data exists.',
           internalContradiction: null,

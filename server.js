@@ -1463,13 +1463,18 @@ If the uploads include the report's first/header pages, read the consumer name, 
         }
 
         // Injected violations get their box on the account's own page — taken
-        // from the account's other violations' markup entries.
+        // from the account's other violations' markup entries, else from the
+        // page its heading prints on (the deterministic roster records it).
+        // Without a page the mark defaults to page 1 and the text search
+        // wanders into the personal-info section — identity fields and prose
+        // are never boxed.
         const pageOfAccount = (acctName) => {
           for (const v of violations) {
             if (v.accountName !== acctName) continue;
             for (const m of (v.markup || [])) if (m.page != null) return m.page;
           }
-          return null;
+          const acct = accounts.find(a => a.accountName === acctName);
+          return (acct && acct._rosterPage) || null;
         };
 
         // Guard 2: every account whose displayed number is masked (*/X) must
